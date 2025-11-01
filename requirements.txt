@@ -1,0 +1,17 @@
+﻿# Core networking / concurrency
+orjson==3.10.7
+requests==2.32.3
+
+# For embeddings and NLP
+sentence-transformers==3.1.1
+openai==1.47.0
+numpy==2.1.2
+scikit-learn==1.5.2
+
+# Utilities
+python-dotenv==1.0.1
+tqdm==4.66.5
+
+# Optional for deployment or local debugging
+flask==3.0.3
+gunicorn==23.0.0
