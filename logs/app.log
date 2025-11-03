@@ -1,0 +1,14 @@
+2025-11-03 18:38:02,067 [INFO] Server starting on 0.0.0.0:8080 ...
+2025-11-03 18:38:02,068 [INFO] Server ready and listening for connections.
+2025-11-03 18:38:20,405 [INFO] [+] Connection from ('127.0.0.1', 51547) | Active: 1
+2025-11-03 18:38:20,406 [INFO] [+] Connection from ('127.0.0.1', 60775) | Active: 2
+2025-11-03 18:38:20,481 [INFO] [-] Connection closed ('127.0.0.1', 51547) | Active: 1
+2025-11-03 18:38:20,576 [INFO] [-] Connection closed ('127.0.0.1', 60775) | Active: 0
+2025-11-03 18:38:20,662 [INFO] [+] Connection from ('127.0.0.1', 64369) | Active: 1
+2025-11-03 18:38:20,745 [INFO] [-] Connection closed ('127.0.0.1', 64369) | Active: 0
+2025-11-03 18:38:21,298 [INFO] [+] Connection from ('127.0.0.1', 53814) | Active: 1
+2025-11-03 18:38:21,300 [INFO] [-] Connection closed ('127.0.0.1', 53814) | Active: 0
+2025-11-03 18:38:21,559 [INFO] [+] Connection from ('127.0.0.1', 53940) | Active: 1
+2025-11-03 18:38:38,523 [WARNING] Falling back to rule-based recommendations: The optional dependency 'joblib' is required. Install it via 'pip install joblib'.
+2025-11-03 18:38:38,525 [WARNING] Metadata unavailable: The optional dependency 'pandas' is required. Install it via 'pip install pandas'.
+2025-11-03 18:38:38,526 [INFO] [-] Connection closed ('127.0.0.1', 53940) | Active: 0
