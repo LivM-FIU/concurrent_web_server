@@ -15,3 +15,6 @@ tqdm==4.66.5
 # Optional for deployment or local debugging
 flask==3.0.3
 gunicorn==23.0.0
+
+spotipy
+schedule
