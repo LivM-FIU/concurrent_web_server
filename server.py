@@ -15,7 +15,10 @@ import logging
 import os
 import signal
 import sys
+from collections import defaultdict, deque
 from datetime import datetime
+from http import HTTPStatus
+from time import time
 from config.settings import settings
 from llm_recommender.recommender import llm_recommender
 
@@ -37,22 +40,34 @@ logging.basicConfig(
 #  Global Variables
 # ─────────────────────────────
 active_connections = 0
-lock = threading.Lock()
+connection_lock = threading.Lock()
+rate_limit_lock = threading.Lock()
 shutdown_event = threading.Event()
+request_history = defaultdict(deque)
+
+RATE_LIMIT_REQUESTS = 60
+RATE_LIMIT_WINDOW = 60  # seconds
 
 # ─────────────────────────────
 #  Utility Functions
 # ─────────────────────────────
-def send_response(conn, code, body, content_type="application/json"):
+def send_response(conn, code, body, content_type="application/json", headers=None):
     """Formats and sends an HTTP response."""
-    response = (
-        f"HTTP/1.1 {code} OK\r\n"
-        f"Content-Type: {content_type}\r\n"
-        f"Content-Length: {len(body)}\r\n"
-        f"Connection: close\r\n\r\n"
-        f"{body}"
-    )
-    conn.sendall(response.encode("utf-8"))
+    status = HTTPStatus(code)
+    encoded_body = body.encode("utf-8")
+    header_lines = [
+        f"HTTP/1.1 {code} {status.phrase}",
+        f"Content-Type: {content_type}; charset=utf-8",
+        f"Content-Length: {len(encoded_body)}",
+        "Connection: close",
+    ]
+
+    if headers:
+        for key, value in headers.items():
+            header_lines.append(f"{key}: {value}")
+
+    response_head = "\r\n".join(header_lines).encode("utf-8") + b"\r\n\r\n"
+    conn.sendall(response_head + encoded_body)
 
 
 def parse_request(request_data):
@@ -87,12 +102,28 @@ def serve_static_file(path):
     return 200, body, mime
 
 
+def is_rate_limited(ip_address):
+    """Simple fixed-window rate limiter per IP."""
+    now = time()
+    with rate_limit_lock:
+        history = request_history[ip_address]
+        while history and now - history[0] > RATE_LIMIT_WINDOW:
+            history.popleft()
+
+        if len(history) >= RATE_LIMIT_REQUESTS:
+            retry_after = max(1, int(RATE_LIMIT_WINDOW - (now - history[0])))
+            return True, retry_after
+
+        history.append(now)
+        return False, None
+
+
 # ─────────────────────────────
 #  Client Handler
 # ─────────────────────────────
 def handle_client(conn, addr):
     global active_connections
-    with lock:
+    with connection_lock:
         active_connections += 1
         logging.info(f"[+] Connection from {addr} | Active: {active_connections}")
 
@@ -104,6 +135,17 @@ def handle_client(conn, addr):
         method, path, body = parse_request(request)
         if not method:
             send_response(conn, 400, json.dumps({"error": "Malformed request"}))
+            return
+
+        limited, retry_after = is_rate_limited(addr[0])
+        if limited:
+            headers = {"Retry-After": str(retry_after)} if retry_after else None
+            send_response(
+                conn,
+                429,
+                json.dumps({"error": "Too Many Requests", "retry_after": retry_after}),
+                headers=headers,
+            )
             return
 
         # Root or static file serving
@@ -118,7 +160,11 @@ def handle_client(conn, addr):
 
         # API endpoint for recommendations
         elif method == "POST" and path == "/api/recommend":
-            data = json.loads(body or "{}")
+            try:
+                data = json.loads(body or "{}")
+            except json.JSONDecodeError:
+                send_response(conn, 400, json.dumps({"error": "Invalid JSON payload"}))
+                return
             prompt = data.get("prompt", "")
             result = llm_recommender(prompt)
             send_response(conn, 200, json.dumps(result))
@@ -143,7 +189,7 @@ def handle_client(conn, addr):
 
     finally:
         conn.close()
-        with lock:
+        with connection_lock:
             active_connections -= 1
             logging.info(f"[-] Connection closed {addr} | Active: {active_connections}")
 
