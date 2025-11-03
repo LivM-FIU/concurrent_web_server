@@ -1,4 +1,4 @@
-﻿# Core networking / concurrency
+# Core networking / concurrency
 orjson==3.10.7
 requests==2.32.3
 
@@ -22,5 +22,6 @@ tqdm==4.66.5
 flask==3.0.3
 gunicorn==23.0.0
 
+# Data ingestion
 spotipy
 schedule
