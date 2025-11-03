@@ -23,12 +23,16 @@ from llm_recommender.recommender import llm_recommender
 #  Logging Configuration
 # ─────────────────────────────
 LOG_FILE = os.path.join("logs", "app.log")
+os.makedirs("logs", exist_ok=True)
+
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stdout),  # ← prints to console
+    ],
 )
-
 # ─────────────────────────────
 #  Global Variables
 # ─────────────────────────────
