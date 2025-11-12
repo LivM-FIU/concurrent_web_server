@@ -23,42 +23,84 @@ import importlib
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+try:  # pragma: no cover - import guarded for environments without pydantic
+    from pydantic import BaseModel, Field
+except ImportError:  # pragma: no cover - dependency optional for tests
+    BaseModel = None  # type: ignore[assignment]
+    Field = None  # type: ignore[assignment]
 
 from . import model_utils
 
 LOGGER = logging.getLogger(__name__)
 
 
-class Range(BaseModel):
-    """Numeric range used for user intent preferences."""
+if BaseModel is not None:
+    class Range(BaseModel):
+        """Numeric range used for user intent preferences."""
 
-    min: Optional[float] = Field(default=None)
-    max: Optional[float] = Field(default=None)
-
-
-class Era(BaseModel):
-    """Time range helper for intent parsing."""
-
-    from_year: Optional[int] = Field(default=None)
-    to_year: Optional[int] = Field(default=None)
+        min: Optional[float] = Field(default=None)
+        max: Optional[float] = Field(default=None)
 
 
-class Intent(BaseModel):
-    """Structured representation of the LLM extracted query intent."""
+    class Era(BaseModel):
+        """Time range helper for intent parsing."""
 
-    moods: List[str] = Field(default_factory=list)
-    avoid_vocals: bool = False
-    genres: List[str] = Field(default_factory=list)
-    energy: Range = Field(default_factory=Range)
-    tempo_bpm: Range = Field(default_factory=Range)
-    era: Era = Field(default_factory=Era)
-    include_artists: List[str] = Field(default_factory=list)
-    exclude_artists: List[str] = Field(default_factory=list)
+        from_year: Optional[int] = Field(default=None)
+        to_year: Optional[int] = Field(default=None)
+
+
+    class Intent(BaseModel):
+        """Structured representation of the LLM extracted query intent."""
+
+        moods: List[str] = Field(default_factory=list)
+        avoid_vocals: bool = False
+        genres: List[str] = Field(default_factory=list)
+        energy: Range = Field(default_factory=Range)
+        tempo_bpm: Range = Field(default_factory=Range)
+        era: Era = Field(default_factory=Era)
+        include_artists: List[str] = Field(default_factory=list)
+        exclude_artists: List[str] = Field(default_factory=list)
+
+else:
+
+    @dataclass
+    class Range:
+        """Numeric range used for user intent preferences."""
+
+        min: Optional[float] = None
+        max: Optional[float] = None
+
+
+    @dataclass
+    class Era:
+        """Time range helper for intent parsing."""
+
+        from_year: Optional[int] = None
+        to_year: Optional[int] = None
+
+
+    @dataclass
+    class Intent:
+        """Structured representation of the LLM extracted query intent."""
+
+        moods: List[str] = field(default_factory=list)
+        avoid_vocals: bool = False
+        genres: List[str] = field(default_factory=list)
+        energy: Range = field(default_factory=Range)
+        tempo_bpm: Range = field(default_factory=Range)
+        era: Era = field(default_factory=Era)
+        include_artists: List[str] = field(default_factory=list)
+        exclude_artists: List[str] = field(default_factory=list)
+
+        def json(self) -> str:
+            return json.dumps(asdict(self))
+
+        def dict(self) -> Dict[str, Any]:
+            return asdict(self)
 
 
 def parse_nl(query: str) -> Intent:
@@ -255,11 +297,13 @@ class RecommendationEngine:
     def recommend(self, prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         prompt = prompt or ""
         retriever = self._load_retriever()
-        meta = self._load_meta()
 
         if retriever is None:
             return self._fallback(prompt, user_id)
 
+        meta = self._load_meta()
+
+        np = _get_numpy()
         cf_result = RetrievalResult(np.array([]), np.array([]))
         sem_result = RetrievalResult(np.array([]), np.array([]))
 
