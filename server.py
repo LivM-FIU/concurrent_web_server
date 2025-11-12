@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sys
+from urllib.parse import parse_qs, urlparse
 from collections import defaultdict, deque
 from datetime import datetime
 from http import HTTPStatus
@@ -159,14 +160,59 @@ def handle_client(conn, addr):
             return
 
         # API endpoint for recommendations
-        elif method == "POST" and path == "/api/recommend":
-            try:
-                data = json.loads(body or "{}")
-            except json.JSONDecodeError:
-                send_response(conn, 400, json.dumps({"error": "Invalid JSON payload"}))
-                return
-            prompt = data.get("prompt", "")
-            result = llm_recommender(prompt)
+        elif (method == "POST" and path.startswith("/api/recommend")) or (
+            method == "GET" and path.startswith("/api/recommend")
+        ):
+            prompt = ""
+            user_id = None
+            refresh_cache = False
+
+            if method == "GET":
+                parsed = urlparse(path)
+                query = parse_qs(parsed.query)
+                prompt = query.get("q", [""])[0] or query.get("prompt", [""])[0]
+                user_id = query.get("user_id", [None])[0]
+                refresh_cache = query.get("refresh", ["false"])[0].lower() == "true"
+            else:
+                parsed = urlparse(path)
+                if parsed.query:
+                    query = parse_qs(parsed.query)
+                    refresh_cache = query.get("refresh", ["false"])[0].lower() == "true"
+                try:
+                    data = json.loads(body or "{}")
+                except json.JSONDecodeError:
+                    send_response(conn, 400, json.dumps({"error": "Invalid JSON payload"}))
+                    return
+                prompt = data.get("prompt", "")
+                user_id = data.get("user_id")
+                if "refresh_cache" in data:
+                    refresh_cache = bool(data.get("refresh_cache"))
+
+            result = llm_recommender(prompt, user_id=user_id, refresh_cache=refresh_cache)
+            send_response(conn, 200, json.dumps(result))
+            return
+
+        # Natural-language search endpoint
+        elif (method == "POST" and path.startswith("/api/search/nlq")) or (
+            method == "GET" and path.startswith("/api/search/nlq")
+        ):
+            prompt = ""
+            user_id = None
+            if method == "GET":
+                parsed = urlparse(path)
+                query = parse_qs(parsed.query)
+                prompt = query.get("q", [""])[0]
+                user_id = query.get("user_id", [None])[0]
+            else:
+                try:
+                    data = json.loads(body or "{}")
+                except json.JSONDecodeError:
+                    send_response(conn, 400, json.dumps({"error": "Invalid JSON payload"}))
+                    return
+                prompt = data.get("query") or data.get("prompt", "")
+                user_id = data.get("user_id")
+
+            result = llm_recommender(prompt, user_id=user_id)
             send_response(conn, 200, json.dumps(result))
             return
 

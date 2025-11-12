@@ -22,7 +22,9 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import re
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -103,17 +105,118 @@ else:
             return asdict(self)
 
 
-def parse_nl(query: str) -> Intent:
-    """Extremely small heuristic parser used as a placeholder for an LLM."""
+_MOOD_KEYWORDS = {
+    "chill": {"chill", "study", "focus", "calm", "relax"},
+    "energetic": {"energetic", "workout", "gym", "run", "hype"},
+    "happy": {"happy", "uplifting", "sunny", "feel good"},
+    "melancholy": {"sad", "moody", "melancholy", "blue"},
+}
 
-    q = (query or "").lower()
-    mood = ""
-    if any(token in q for token in ("chill", "study", "focus")):
-        mood = "chill"
-    elif "workout" in q or "run" in q or "gym" in q:
-        mood = "energetic"
-    avoid_vocals = ("no vocals" in q) or ("instrumental" in q)
-    return Intent(moods=[mood] if mood else [], avoid_vocals=avoid_vocals)
+_GENRE_KEYWORDS = {
+    "lofi": {"lofi", "lo-fi", "lo fi"},
+    "piano": {"piano", "keys"},
+    "ambient": {"ambient"},
+    "jazz": {"jazz"},
+    "rock": {"rock"},
+    "synthwave": {"synthwave", "retro wave", "retrowave"},
+    "house": {"house", "deep house", "progressive house"},
+    "hip hop": {"hip hop", "hip-hop", "rap"},
+    "pop": {"pop"},
+    "classical": {"classical", "orchestral"},
+}
+
+_TEMPO_WORDS = {
+    "slow": (0, 90),
+    "mid": (90, 120),
+    "medium": (90, 120),
+    "moderate": (90, 120),
+    "fast": (120, 999),
+    "upbeat": (120, 999),
+    "rapid": (130, 999),
+}
+
+_ENERGY_WORDS = {
+    "low": (0.0, 0.4),
+    "medium": (0.3, 0.7),
+    "mid": (0.3, 0.7),
+    "high": (0.6, 1.0),
+    "intense": (0.6, 1.0),
+}
+
+_DECADE_PATTERN = re.compile(r"(?P<decade>(?:19|20)\d0)s")
+_YEAR_RANGE_PATTERN = re.compile(r"(?P<start>19\d{2}|20\d{2})\s*[-to]{1,3}\s*(?P<end>19\d{2}|20\d{2})")
+_BPM_PATTERN = re.compile(r"(?P<value>\d{2,3})\s*(?:bpm|beats?)")
+_ARTIST_INCLUDE_PATTERN = re.compile(
+    r"(?:like|include|featuring|featuring\s+artist)\s+([a-z0-9'&\s]+?)(?=(?:,|;|and|but|with|without|except|$))"
+)
+_ARTIST_EXCLUDE_PATTERN = re.compile(
+    r"(?:no|exclude|avoid)\s+([a-z0-9'&\s]+?)(?=(?:,|;|and|but|with|without|except|$))"
+)
+
+
+def parse_nl(query: str) -> Intent:
+    """Heuristic natural-language parser approximating the LLM output schema."""
+
+    q_raw = query or ""
+    q = q_raw.lower()
+
+    moods: List[str] = []
+    for label, keywords in _MOOD_KEYWORDS.items():
+        if any(word in q for word in keywords):
+            moods.append(label)
+
+    genres: List[str] = []
+    for genre, keywords in _GENRE_KEYWORDS.items():
+        if any(word in q for word in keywords):
+            genres.append(genre)
+
+    tempo_range = Range()
+    bpm_match = _BPM_PATTERN.search(q)
+    if bpm_match:
+        bpm_value = float(bpm_match.group("value"))
+        tempo_range = Range(min=max(0.0, bpm_value - 10), max=bpm_value + 10)
+    else:
+        for keyword, (low, high) in _TEMPO_WORDS.items():
+            if keyword in q:
+                tempo_range = Range(min=float(low), max=float(high))
+                break
+
+    energy_range = Range()
+    for keyword, (low, high) in _ENERGY_WORDS.items():
+        if keyword in q:
+            energy_range = Range(min=low, max=high)
+            break
+
+    era = Era()
+    decade_match = _DECADE_PATTERN.search(q)
+    if decade_match:
+        decade = decade_match.group("decade")
+        era = Era(from_year=int(decade), to_year=int(decade) + 9)
+    else:
+        year_range = _YEAR_RANGE_PATTERN.search(q)
+        if year_range:
+            era = Era(from_year=int(year_range.group("start")), to_year=int(year_range.group("end")))
+        else:
+            single_year = re.search(r"(19\d{2}|20\d{2})", q)
+            if single_year:
+                year = int(single_year.group(1))
+                era = Era(from_year=year, to_year=year)
+
+    include_artists = [match.strip() for match in _ARTIST_INCLUDE_PATTERN.findall(q)]
+    exclude_artists = [match.strip() for match in _ARTIST_EXCLUDE_PATTERN.findall(q)]
+
+    avoid_vocals = ("no vocals" in q) or ("instrumental" in q) or ("without vocals" in q)
+
+    return Intent(
+        moods=moods,
+        avoid_vocals=avoid_vocals,
+        genres=genres,
+        energy=energy_range,
+        tempo_bpm=tempo_range,
+        era=era,
+        include_artists=include_artists,
+        exclude_artists=exclude_artists,
+    )
 
 
 _NUMPY = None
@@ -139,6 +242,14 @@ class RetrievalResult:
     def as_lists(self) -> Tuple[List[str], List[float]]:
         np = _get_numpy()
         return np.asarray(self.ids).tolist(), np.asarray(self.scores, dtype=float).tolist()
+
+
+@dataclass
+class _CacheEntry:
+    """In-memory cache entry for previously computed recommendations."""
+
+    timestamp: float
+    payload: Dict[str, Any]
 
 
 class HybridRetriever:
@@ -261,6 +372,7 @@ class RecommendationEngine:
         self,
         data_dir: Path | str = model_utils.DATA_DIR,
         artifact_dir: Path | str = model_utils.ARTIFACT_DIR,
+        cache_ttl: float = 300.0,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.artifact_dir = Path(artifact_dir)
@@ -268,6 +380,8 @@ class RecommendationEngine:
         self._retriever: Optional[HybridRetriever] = None
         self._meta = None
         self._fallback_reason: Optional[str] = None
+        self._cache_ttl = float(cache_ttl)
+        self._user_cache: Dict[str, _CacheEntry] = {}
 
     # Lazy loaders ------------------------------------------------------------
     def _load_retriever(self) -> Optional[HybridRetriever]:
@@ -294,8 +408,20 @@ class RecommendationEngine:
         return self._meta
 
     # Public API --------------------------------------------------------------
-    def recommend(self, prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def recommend(
+        self,
+        prompt: str,
+        user_id: Optional[str] = None,
+        *,
+        refresh_cache: bool = False,
+    ) -> Dict[str, Any]:
         prompt = prompt or ""
+
+        if user_id and not prompt and not refresh_cache:
+            cached = self._get_cached(user_id)
+            if cached is not None:
+                return cached
+
         retriever = self._load_retriever()
 
         if retriever is None:
@@ -314,11 +440,13 @@ class RecommendationEngine:
             intent = parse_nl(prompt)
             sem_result = retriever.by_nlq(prompt)
 
+        cf_result, sem_result = self._filter_candidates(intent, cf_result, sem_result, meta)
+
         scored = rank(cf_result, sem_result, meta, user_history={"skipped_ids": set()})
         payload = [self._payload_item(cid, score, meta) for cid, score in scored]
         explanation = self._build_explanation(intent, bool(cf_result.ids.size), bool(sem_result.ids.size))
 
-        return {
+        response = {
             "prompt": prompt,
             "user_id": user_id,
             "intent": json.loads(intent.json()) if intent else None,
@@ -326,6 +454,11 @@ class RecommendationEngine:
             "count": len(payload),
             "explanation": explanation,
         }
+
+        if user_id and not prompt:
+            self._store_cache(user_id, response)
+
+        return response
 
     # Helpers -----------------------------------------------------------------
     def _fallback(self, prompt: str, user_id: Optional[str]) -> Dict[str, Any]:
@@ -376,6 +509,161 @@ class RecommendationEngine:
             parts.append("Used semantic similarity search.")
         return " ".join(parts) if parts else "Default ranking applied."
 
+    # Cache utilities ---------------------------------------------------------
+    def _get_cached(self, user_id: str) -> Optional[Dict[str, Any]]:
+        entry = self._user_cache.get(user_id)
+        if entry is None:
+            return None
+        if time.time() - entry.timestamp > self._cache_ttl:
+            self._user_cache.pop(user_id, None)
+            return None
+        return entry.payload
+
+    def _store_cache(self, user_id: str, payload: Dict[str, Any]) -> None:
+        self._user_cache[user_id] = _CacheEntry(timestamp=time.time(), payload=payload)
+
+    # Filtering ---------------------------------------------------------------
+    def _filter_candidates(
+        self,
+        intent: Optional[Intent],
+        cf_result: RetrievalResult,
+        sem_result: RetrievalResult,
+        meta_df,
+    ) -> Tuple[RetrievalResult, RetrievalResult]:
+        if intent is None or meta_df is None:
+            return cf_result, sem_result
+
+        np = _get_numpy()
+
+        def _as_array(values: Any) -> Any:
+            return np.asarray(values)
+
+        def _filter(result: RetrievalResult) -> RetrievalResult:
+            ids = _as_array(result.ids)
+            scores = _as_array(result.scores)
+            if ids.size == 0:
+                return result
+
+            mask = []
+            for cid in ids:
+                try:
+                    row = meta_df.loc[cid]
+                except Exception:
+                    row = None
+                mask.append(self._row_matches_intent(row, intent))
+
+            if not any(mask):
+                return RetrievalResult(ids[:0], scores[:0])
+
+            mask_arr = np.asarray(mask)
+            return RetrievalResult(ids[mask_arr], scores[mask_arr])
+
+        return _filter(cf_result), _filter(sem_result)
+
+    @staticmethod
+    def _row_matches_intent(row, intent: Intent) -> bool:
+        if row is None:
+            return True
+
+        if hasattr(row, "to_dict"):
+            data = row.to_dict()
+        elif hasattr(row, "items"):
+            data = dict(row.items())
+        else:
+            data = dict(row)
+
+        def _get_field(*names: str) -> Any:
+            for name in names:
+                if name in data:
+                    return data[name]
+            return None
+
+        def _normalise_tokens(value: Any) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                tokens = re.split(r"[\s,;\/|]+", value.lower())
+                return [token for token in tokens if token]
+            if isinstance(value, (list, tuple, set)):
+                return [str(item).lower() for item in value]
+            return []
+
+        def _artist_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value.lower()
+            if isinstance(value, (list, tuple, set)):
+                return " ".join(str(item) for item in value).lower()
+            return str(value).lower()
+
+        if intent.avoid_vocals:
+            vocals = _get_field("vocals", "has_vocals", "is_vocal")
+            if isinstance(vocals, bool) and vocals:
+                return False
+            instrumentalness = _get_field("instrumentalness")
+            if instrumentalness is not None and float(instrumentalness) < 0.5:
+                return False
+
+        if intent.genres:
+            genres = set(_normalise_tokens(_get_field("genres", "genre")))
+            if genres and not genres.intersection({g.lower() for g in intent.genres}):
+                return False
+
+        if intent.moods:
+            moods = set(_normalise_tokens(_get_field("moods", "mood")))
+            if moods and not moods.intersection({m.lower() for m in intent.moods}):
+                return False
+
+        if intent.include_artists:
+            artist = _artist_text(_get_field("artist", "artists"))
+            if artist:
+                if not any(name.lower() in artist for name in intent.include_artists):
+                    return False
+
+        if intent.exclude_artists:
+            artist = _artist_text(_get_field("artist", "artists"))
+            if artist and any(name.lower() in artist for name in intent.exclude_artists):
+                return False
+
+        tempo = _get_field("tempo_bpm", "tempo", "bpm")
+        if tempo is not None and (intent.tempo_bpm.min is not None or intent.tempo_bpm.max is not None):
+            try:
+                tempo_value = float(tempo)
+            except (TypeError, ValueError):
+                tempo_value = None
+            if tempo_value is not None:
+                if intent.tempo_bpm.min is not None and tempo_value < intent.tempo_bpm.min:
+                    return False
+                if intent.tempo_bpm.max is not None and tempo_value > intent.tempo_bpm.max:
+                    return False
+
+        energy = _get_field("energy", "energy_level")
+        if energy is not None and (intent.energy.min is not None or intent.energy.max is not None):
+            try:
+                energy_value = float(energy)
+            except (TypeError, ValueError):
+                energy_value = None
+            if energy_value is not None:
+                if intent.energy.min is not None and energy_value < intent.energy.min:
+                    return False
+                if intent.energy.max is not None and energy_value > intent.energy.max:
+                    return False
+
+        year_value = _get_field("release_year", "year")
+        if year_value and (intent.era.from_year is not None or intent.era.to_year is not None):
+            try:
+                year_int = int(str(year_value)[:4])
+            except (TypeError, ValueError):
+                year_int = None
+            if year_int is not None:
+                if intent.era.from_year is not None and year_int < intent.era.from_year:
+                    return False
+                if intent.era.to_year is not None and year_int > intent.era.to_year:
+                    return False
+
+        return True
+
 
 _ENGINE: Optional[RecommendationEngine] = None
 _ENGINE_LOCK = threading.Lock()
@@ -390,11 +678,16 @@ def _get_engine() -> RecommendationEngine:
     return _ENGINE
 
 
-def llm_recommender(prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+def llm_recommender(
+    prompt: str,
+    user_id: Optional[str] = None,
+    *,
+    refresh_cache: bool = False,
+) -> Dict[str, Any]:
     """Public entry point used by the threaded HTTP server."""
 
     engine = _get_engine()
-    return engine.recommend(prompt=prompt, user_id=user_id)
+    return engine.recommend(prompt=prompt, user_id=user_id, refresh_cache=refresh_cache)
 
 
 __all__ = [
