@@ -115,7 +115,7 @@ def run_ingestion_job():
         json.dump(all_tracks, file, indent=2, ensure_ascii=False)
 
     logging.info("Saved %d tracks to %s", len(all_tracks), SONGS_FILE)
-    print(f"✅ Ingestion complete: {len(all_tracks)} tracks saved.")
+    print(f"Ingestion complete: {len(all_tracks)} tracks saved.")
     return len(all_tracks)
 
 
@@ -126,7 +126,7 @@ def schedule_daily(hour="03:00"):
     """Run the ingestion job every day at the given hour (24h format)."""
     logging.info("Scheduling daily ingestion at %s", hour)
     schedule.every().day.at(hour).do(run_ingestion_job)
-    print(f"🕒 Scheduled daily ingestion at {hour}")
+    print(f"Scheduled daily ingestion at {hour}")
     while True:
         schedule.run_pending()
         time.sleep(60)
