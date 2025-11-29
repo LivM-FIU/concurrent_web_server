@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+import numpy as np
 from pydantic import BaseModel, Field
 
 from . import model_utils
@@ -210,7 +210,6 @@ def rank(
 
     results.sort(key=lambda item: item[1], reverse=True)
     return results[:limit]
-
 
 class RecommendationEngine:
     """High level orchestrator for the recommendation workflow."""

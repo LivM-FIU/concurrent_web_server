@@ -202,7 +202,6 @@ def handle_shutdown(sig, frame):
     shutdown_event.set()
     sys.exit(0)
 
-
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
 
