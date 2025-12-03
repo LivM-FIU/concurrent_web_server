@@ -1,11 +1,12 @@
 """
+server.py
 Concurrent Web Server
 Author: Livan Miranda
 Description:
   Multithreaded web server handling multiple simultaneous clients.
   Serves static files and LLM-based recommendation API.
 
-Phase 2 - Step 1: Enhanced Concurrency Version
+Phase 2 - Enhanced Concurrency + Hybrid Recommender
 """
 
 import socket
@@ -19,6 +20,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from http import HTTPStatus
 from time import time
+
 from config.settings import settings
 from llm_recommender.recommender import llm_recommender
 
@@ -28,14 +30,17 @@ from llm_recommender.recommender import llm_recommender
 LOG_FILE = os.path.join("logs", "app.log")
 os.makedirs("logs", exist_ok=True)
 
+log_level = getattr(logging, str(settings.LOG_LEVEL).upper(), logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
         logging.StreamHandler(sys.stdout),  # ← prints to console
     ],
 )
+
 # ─────────────────────────────
 #  Global Variables
 # ─────────────────────────────
@@ -47,6 +52,7 @@ request_history = defaultdict(deque)
 
 RATE_LIMIT_REQUESTS = 60
 RATE_LIMIT_WINDOW = 60  # seconds
+
 
 # ─────────────────────────────
 #  Utility Functions
@@ -67,7 +73,11 @@ def send_response(conn, code, body, content_type="application/json", headers=Non
             header_lines.append(f"{key}: {value}")
 
     response_head = "\r\n".join(header_lines).encode("utf-8") + b"\r\n\r\n"
-    conn.sendall(response_head + encoded_body)
+    try:
+        conn.sendall(response_head + encoded_body)
+    except Exception:
+        # Best effort; nothing else we can do here
+        pass
 
 
 def parse_request(request_data):
@@ -125,10 +135,10 @@ def handle_client(conn, addr):
     global active_connections
     with connection_lock:
         active_connections += 1
-        logging.info(f"[+] Connection from {addr} | Active: {active_connections}")
+        logging.info("[+] Connection from %s | Active: %s", addr, active_connections)
 
     try:
-        request = conn.recv(8192).decode("utf-8")
+        request = conn.recv(8192).decode("utf-8", errors="ignore")
         if not request:
             return
 
@@ -165,8 +175,10 @@ def handle_client(conn, addr):
             except json.JSONDecodeError:
                 send_response(conn, 400, json.dumps({"error": "Invalid JSON payload"}))
                 return
+
             prompt = data.get("prompt", "")
-            result = llm_recommender(prompt)
+            user_id = data.get("user_id")  # optional, for CF-based personalisation
+            result = llm_recommender(prompt, user_id=user_id)
             send_response(conn, 200, json.dumps(result))
             return
 
@@ -183,34 +195,42 @@ def handle_client(conn, addr):
         # Unrecognized endpoint
         send_response(conn, 404, json.dumps({"error": "Not Found"}))
 
-    except Exception as e:
-        logging.exception(f"Error handling {addr}: {e}")
-        send_response(conn, 500, json.dumps({"error": "Internal Server Error"}))
+    except Exception as e:  # pragma: no cover
+        logging.exception("Error handling %s: %s", addr, e)
+        try:
+            send_response(conn, 500, json.dumps({"error": "Internal Server Error"}))
+        except Exception:
+            pass
 
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
         with connection_lock:
             active_connections -= 1
-            logging.info(f"[-] Connection closed {addr} | Active: {active_connections}")
+            logging.info("[-] Connection closed %s | Active: %s", addr, active_connections)
 
 
 # ─────────────────────────────
 #  Graceful Shutdown
 # ─────────────────────────────
-def handle_shutdown(sig, frame):
-    logging.info("Shutdown signal received. Stopping server...")
+def handle_shutdown(sig, frame):  # pragma: no cover
+    logging.info("Shutdown signal received (%s). Stopping server...", sig)
     shutdown_event.set()
-    sys.exit(0)
+    # The main accept() loop will exit once shutdown_event is set
+
 
 signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
+
 
 # ─────────────────────────────
 #  Server Main Loop
 # ─────────────────────────────
 def start_server():
     host, port = settings.HOST, settings.PORT
-    logging.info(f"Server starting on {host}:{port} ...")
+    logging.info("Server starting on %s:%s ...", host, port)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -225,6 +245,11 @@ def start_server():
                 thread.start()
             except OSError:
                 break  # triggered by shutdown_event
+            except Exception as exc:  # pragma: no cover
+                logging.exception("Accept loop error: %s", exc)
+
+    logging.info("Server shut down.")
+
 
 if __name__ == "__main__":
     start_server()

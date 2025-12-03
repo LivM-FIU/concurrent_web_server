@@ -1,0 +1,154 @@
+2025-12-02 21:34:07,333 [INFO] Starting Spotify ingestion job...
+2025-12-02 21:34:07,791 [INFO] EmbeddingClient: using Azure OpenAI embeddings.
+2025-12-02 21:34:08,356 [INFO] HTTP Request: POST https://text-embeddings.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+2025-12-02 21:34:08,663 [INFO] HTTP Request: POST https://text-embeddings.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+2025-12-02 21:34:09,118 [INFO] Effective search queries: ['lofi chill', 'study beats', 'piano instrumental', 'jazz coffee', 'workout motivation', 'ambient focus', 'pop hits', 'classic rock', 'piano instrumental instrumental', 'lofi chill vibes', 'classic rock music', 'piano instrumental music', 'lofi chill music', 'pop hits songs', 'pop hits music', 'pop hits hits', 'lofi chill hits', 'lofi chill mix', 'lofi chill songs', 'jazz coffee music', 'lofi chill 2025', 'workout motivation hits', 'lofi chill radio', 'lofi chill playlist']
+2025-12-02 21:34:09,118 [INFO] Searching tracks for query: lofi chill
+2025-12-02 21:34:13,265 [INFO] Searching playlists for query: lofi chill
+2025-12-02 21:34:13,744 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:13,744 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:34:20,843 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:20,843 [INFO] Fetching tracks from playlist 'Lofi Girl - beats to relax/study to' (0vvXsWCC9xrXsKd4FyS8kM)
+2025-12-02 21:34:29,696 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:29,696 [INFO] Searching tracks for query: study beats
+2025-12-02 21:34:32,808 [INFO] Searching playlists for query: study beats
+2025-12-02 21:34:33,225 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:33,225 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:33,225 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:33,225 [INFO] Fetching tracks from playlist 'Lofi Girl - beats to relax/study to' (0vvXsWCC9xrXsKd4FyS8kM)
+2025-12-02 21:34:33,570 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:33,570 [INFO] Searching tracks for query: piano instrumental
+2025-12-02 21:34:37,969 [INFO] Searching playlists for query: piano instrumental
+2025-12-02 21:34:38,446 [INFO] Fetching tracks from playlist 'Piano Covers of Famous Songs' (6sWNtqsq1ip2quKm6U3UvD)
+2025-12-02 21:34:43,913 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:43,913 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:43,913 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:43,913 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:43,914 [INFO] Searching tracks for query: jazz coffee
+2025-12-02 21:34:46,455 [INFO] Searching playlists for query: jazz coffee
+2025-12-02 21:34:46,816 [INFO] Fetching tracks from playlist 'Cozy Coffee Shop \u2615 Jazz in the Background' (5vVSfOsF8YRueAI1dOI0Lh)
+2025-12-02 21:34:51,585 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:34:51,585 [INFO] Fetching tracks from playlist 'Morning Café Jazz' (37talafIK8enbbryNV5ZCg)
+2025-12-02 21:35:00,307 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:00,307 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:00,307 [INFO] Searching tracks for query: workout motivation
+2025-12-02 21:35:04,432 [INFO] Searching playlists for query: workout motivation
+2025-12-02 21:35:04,838 [INFO] Fetching tracks from playlist 'BEAST MODE - Motivation for sports GYM and bodybuilding' (44imBReuLDHuIP0j4UmCtm)
+2025-12-02 21:35:11,942 [INFO] Fetching tracks from playlist 'WORKOUT - Motivational Speeches' (2xAVGNVnHRJJwOvhH1jQLS)
+2025-12-02 21:35:13,901 [INFO] Fetching tracks from playlist '50 Best Workout Songs That Will Have You *Actually* Breaking a Sweat ' (2rKxqZEf3zcoateybTiJDn)
+2025-12-02 21:35:24,809 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:24,810 [INFO] Fetching tracks from playlist 'WORKOUT PLAYLIST 2025' (2SM6rniZl84fEyMCB5KMQB)
+2025-12-02 21:35:34,408 [INFO] Searching tracks for query: ambient focus
+2025-12-02 21:35:38,217 [INFO] Searching playlists for query: ambient focus
+2025-12-02 21:35:38,640 [INFO] Fetching tracks from playlist 'Ambient Focus & Concentration' (0XmZPUrmpzDrsEfpW7cQc3)
+2025-12-02 21:35:47,095 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:47,095 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:47,095 [INFO] Fetching tracks from playlist 'Ambient Chill' (1kqBP6eE24L0agNpnTIKtc)
+2025-12-02 21:35:52,649 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:35:52,650 [INFO] Searching tracks for query: pop hits
+2025-12-02 21:35:55,754 [INFO] Searching playlists for query: pop hits
+2025-12-02 21:35:56,171 [INFO] Fetching tracks from playlist 'Pop Hits 2000s – 2025' (6mtYuOxzl58vSGnEDtZ9uB)
+2025-12-02 21:36:03,607 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:03,608 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:03,608 [INFO] Fetching tracks from playlist 'COUNTRY HITS 2025 \U0001f525 New Country Songs + Top Hits' (4Jb4PDWREzNnbZcOHPcZPy)
+2025-12-02 21:36:14,549 [INFO] Fetching tracks from playlist 'POPULAR CHRISTMAS MUSIC \U0001f385\U0001f3fb\U0001f384\U0001f381 HITS 2025' (1cSe1tbdYYYnyoP93yJlRA)
+2025-12-02 21:36:24,818 [INFO] Searching tracks for query: classic rock
+2025-12-02 21:36:28,939 [INFO] Searching playlists for query: classic rock
+2025-12-02 21:36:29,382 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:29,382 [INFO] Fetching tracks from playlist 'Top Classic Rock Hits Of All Time' (1ti3v0lLrJ4KhSTuxt4loZ)
+2025-12-02 21:36:39,438 [INFO] Fetching tracks from playlist 'Classic Rock Songs 60s 70s 80s 90s' (6b2dBnxolvwV2L1L4thWRm)
+2025-12-02 21:36:47,896 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:47,896 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:47,897 [INFO] Searching tracks for query: piano instrumental instrumental
+2025-12-02 21:36:51,536 [INFO] Searching playlists for query: piano instrumental instrumental
+2025-12-02 21:36:51,990 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:51,990 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:51,990 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:51,990 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:51,990 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:51,990 [INFO] Searching tracks for query: lofi chill vibes
+2025-12-02 21:36:55,108 [INFO] Searching playlists for query: lofi chill vibes
+2025-12-02 21:36:55,489 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:36:55,489 [INFO] Fetching tracks from playlist 'lofi Jazz Cafe \U0001f3b7Study Beats & Chill Vibes' (2Al9G2jrWkwDlRFMZaw1GX)
+2025-12-02 21:37:03,801 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:37:04,198 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:04,198 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:04,198 [INFO] Searching tracks for query: classic rock music
+2025-12-02 21:37:06,665 [INFO] Searching playlists for query: classic rock music
+2025-12-02 21:37:07,087 [INFO] Fetching tracks from playlist 'Top Classic Rock Hits Of All Time' (1ti3v0lLrJ4KhSTuxt4loZ)
+2025-12-02 21:37:07,388 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:07,388 [INFO] Fetching tracks from playlist 'Classic Rock Greatest Hits' (6TeyryiZ2UEf3CbLXyztFA)
+2025-12-02 21:37:17,164 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:17,164 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:17,164 [INFO] Searching tracks for query: piano instrumental music
+2025-12-02 21:37:20,543 [INFO] Searching playlists for query: piano instrumental music
+2025-12-02 21:37:20,892 [INFO] Fetching tracks from playlist 'The most beautiful piano pieces of all time' (7fsTsc93CR8HqJWVOJM1SZ)
+2025-12-02 21:37:30,003 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:30,003 [INFO] Fetching tracks from playlist 'PIANO COVERS 2025/2026 \U0001f3b9 relaxing versions of popular songs' (2dFYbLO2e91eiXispfv616)
+2025-12-02 21:37:34,673 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:34,674 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:34,674 [INFO] Searching tracks for query: lofi chill music
+2025-12-02 21:37:37,596 [INFO] Searching playlists for query: lofi chill music
+2025-12-02 21:37:38,033 [INFO] Fetching tracks from playlist 'lofi chill beats (sleep, study, relax) lofi hip hop music\U0001f3a7' (4x9OtLt7bsmvqktbF0Y0Gm)
+2025-12-02 21:37:45,601 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:45,601 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:45,601 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:45,601 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:37:45,601 [INFO] Searching tracks for query: pop hits songs
+2025-12-02 21:37:48,215 [INFO] Searching playlists for query: pop hits songs
+2025-12-02 21:37:48,599 [INFO] Fetching tracks from playlist 'COUNTRY HITS 2025 \U0001f525 New Country Songs + Top Hits' (4Jb4PDWREzNnbZcOHPcZPy)
+2025-12-02 21:37:48,974 [INFO] Fetching tracks from playlist 'Pop Hits 2025 (Top 50)' (34NbomaTu7YuOYnky8nLXL)
+2025-12-02 21:37:56,727 [INFO] Fetching tracks from playlist '90s HITS | TOP 100 SONGS' (3C64V048fGyQfCjmu9TIGA)
+2025-12-02 21:38:04,687 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:04,687 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:04,687 [INFO] Searching tracks for query: pop hits music
+2025-12-02 21:38:09,060 [INFO] Searching playlists for query: pop hits music
+2025-12-02 21:38:09,460 [INFO] Fetching tracks from playlist 'POPULAR CHRISTMAS MUSIC \U0001f385\U0001f3fb\U0001f384\U0001f381 HITS 2025' (1cSe1tbdYYYnyoP93yJlRA)
+2025-12-02 21:38:09,945 [INFO] Fetching tracks from playlist 'COUNTRY HITS 2025 \U0001f525 New Country Songs + Top Hits' (4Jb4PDWREzNnbZcOHPcZPy)
+2025-12-02 21:38:10,268 [INFO] Fetching tracks from playlist '90s HITS | TOP 100 SONGS' (3C64V048fGyQfCjmu9TIGA)
+2025-12-02 21:38:10,846 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:10,847 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:10,847 [INFO] Searching tracks for query: pop hits hits
+2025-12-02 21:38:12,649 [INFO] Searching playlists for query: pop hits hits
+2025-12-02 21:38:13,024 [INFO] Fetching tracks from playlist 'Pop Hits 2025 (Top 50)' (34NbomaTu7YuOYnky8nLXL)
+2025-12-02 21:38:13,414 [INFO] Fetching tracks from playlist 'COUNTRY HITS 2025 \U0001f525 New Country Songs + Top Hits' (4Jb4PDWREzNnbZcOHPcZPy)
+2025-12-02 21:38:13,889 [INFO] Fetching tracks from playlist 'POPULAR CHRISTMAS MUSIC \U0001f385\U0001f3fb\U0001f384\U0001f381 HITS 2025' (1cSe1tbdYYYnyoP93yJlRA)
+2025-12-02 21:38:14,203 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:14,203 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:14,203 [INFO] Searching tracks for query: lofi chill hits
+2025-12-02 21:38:18,055 [INFO] Searching playlists for query: lofi chill hits
+2025-12-02 21:38:18,507 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:38:18,815 [INFO] Fetching tracks from playlist 'CHRISTMAS LOFI 2025 \u26c4\ufe0f cozy covers' (7kaCZN01HznKEEJ4Wvd18U)
+2025-12-02 21:38:20,648 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:20,648 [INFO] Fetching tracks from playlist 'Studio Ghibli Lofi Music & Chill Beats' (2rcMRS9fDOnuu5YUTXAcQZ)
+2025-12-02 21:38:27,615 [INFO] Fetching tracks from playlist 'Lofi Pop Punk / Emo / Punk ' (4Yqa83MgHgY20mAdjHtMdK)
+2025-12-02 21:38:33,627 [INFO] Searching tracks for query: lofi chill mix
+2025-12-02 21:38:36,796 [INFO] Searching playlists for query: lofi chill mix
+2025-12-02 21:38:37,219 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:37,219 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:38:37,528 [INFO] Fetching tracks from playlist 'Minecraft Lofi Playlist \u26cf\ufe0f [Chill Minecraft Lo-fi Hip-hop]' (0mz9BjKsshfmt6SN3Nm00W)
+2025-12-02 21:38:40,701 [INFO] Fetching tracks from playlist 'Jazz HipHop Beats | LoFi HipHop | Lofi Jazz Hop' (6bX6RfpkoRwqH3at702xja)
+2025-12-02 21:38:48,965 [INFO] Fetching tracks from playlist 'Study Music 2025 \U0001f4da' (471N195f5jAVs086lzYglw)
+2025-12-02 21:38:51,557 [INFO] Searching tracks for query: lofi chill songs
+2025-12-02 21:38:53,945 [INFO] Searching playlists for query: lofi chill songs
+2025-12-02 21:38:54,286 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:38:54,763 [INFO] Fetching tracks from playlist 'LOFI COVERS of popular songs \U0001f319 2025' (1HVP7E8RkpieiGSxvATJbU)
+2025-12-02 21:38:58,959 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:38:58,959 [INFO] Fetching tracks from playlist 'Lofi Fruits Music - lofi hip hop beats to study, relax & sleep to' (3LFIBdP7eZXJKqf3guepZ1)
+2025-12-02 21:39:03,851 [INFO] Fetching tracks from playlist 'Energetic Upbeat lofi \U0001f349 Jazzhop Beats & Chillhop Music' (5vImPKH5smp2ifK34N6XTd)
+2025-12-02 21:39:08,735 [INFO] Searching tracks for query: jazz coffee music
+2025-12-02 21:39:10,931 [INFO] Searching playlists for query: jazz coffee music
+2025-12-02 21:39:11,288 [INFO] Fetching tracks from playlist 'Coffee Relaxing Jazz - Relaxing Jazz Instrumental Music For Study, Work, Relax' (4cwnHX3jRNhFwpz8Ifa1DS)
+2025-12-02 21:39:17,505 [INFO] Fetching tracks from playlist 'Cozy Coffee Shop \u2615 Jazz in the Background' (5vVSfOsF8YRueAI1dOI0Lh)
+2025-12-02 21:39:17,947 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:39:17,947 [INFO] Fetching tracks from playlist 'Lofi Coffee Shop (Lo-Fi Café Morning)' (7K6fVGUcL6ChCsRMJP4oOC)
+2025-12-02 21:39:19,879 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:39:19,880 [INFO] Searching tracks for query: lofi chill 2025
+2025-12-02 21:39:22,849 [INFO] Searching playlists for query: lofi chill 2025
+2025-12-02 21:39:23,241 [INFO] Fetching tracks from playlist 'Lofi Chill 2025 ' (4Tgee3qSWkVC674ZgGVuaf)
+2025-12-02 21:39:25,504 [INFO] Fetching tracks from playlist 'LOFI COVERS of popular songs \U0001f319 2025' (1HVP7E8RkpieiGSxvATJbU)
+2025-12-02 21:39:25,824 [INFO] Fetching tracks from playlist 'Chill Drive - Stress Relief, Relaxing Music | Lofi Hip Hop Music' (5SDPei4m0IuABIYRsDJcBC)
+2025-12-02 21:39:26,152 [INFO] Fetching tracks from playlist 'CHRISTMAS LOFI 2025 \u26c4\ufe0f cozy covers' (7kaCZN01HznKEEJ4Wvd18U)
+2025-12-02 21:39:26,471 [WARNING] Encountered invalid playlist item: None
+2025-12-02 21:39:26,471 [INFO] Searching tracks for query: workout motivation hits
+2025-12-02 21:39:29,333 [WARNING] Your application has reached a rate/request limit. Retry will occur after: 83360

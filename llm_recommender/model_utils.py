@@ -1,4 +1,6 @@
-"""Utility helpers for the LLM driven recommender system.
+"""
+model_utils.py
+Utility helpers for the LLM driven recommender system.
 
 This module keeps all heavyweight imports optional and provides
 utility helpers to build and load the machine learning artefacts used
@@ -17,7 +19,7 @@ from __future__ import annotations
 import importlib
 import logging
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,74 +27,93 @@ LOGGER = logging.getLogger(__name__)
 DATA_DIR = Path("data")
 ARTIFACT_DIR = Path("artifacts")
 
+
 class DependencyError(RuntimeError):
     """Raised when an optional dependency is not installed."""
+
 
 class MissingDataError(RuntimeError):
     """Raised when an expected data file cannot be located."""
 
+
 class MissingArtifactError(RuntimeError):
     """Raised when a persisted model artefact is missing."""
 
+
 def _resolve_path(path: Path | str) -> Path:
     """Return a normalised :class:`Path` instance."""
-
     return Path(path).expanduser().resolve()
+
 
 def ensure_directory(path: Path | str) -> Path:
     """Create a directory (and parents) if it does not already exist."""
-
     directory = _resolve_path(path)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
+
 def _import_module(name: str, install_hint: Optional[str] = None) -> Any:
-    """Import *name* lazily and raise a helpful :class:`DependencyError`.
-
-    Parameters
-    ----------
-    name:
-        Fully qualified module name to import.
-    install_hint:
-        Optional package name or command to display to the user if the
-        import fails.
-    """
-
+    """Import *name* lazily and raise a helpful :class:`DependencyError`."""
     try:
         return importlib.import_module(name)
-    except ImportError as exc:  # pragma: no cover - exercised indirectly
+    except ImportError as exc:  # pragma: no cover
         hint = install_hint or name
         raise DependencyError(
             f"The optional dependency '{name}' is required. Install it via 'pip install {hint}'."
         ) from exc
 
+
 def _import_attr(module_name: str, attribute: str, install_hint: Optional[str] = None) -> Any:
     """Import *attribute* from *module_name* lazily."""
-
     module = _import_module(module_name, install_hint=install_hint)
     try:
         return getattr(module, attribute)
-    except AttributeError as exc:  # pragma: no cover - defensive
+    except AttributeError as exc:  # pragma: no cover
         raise DependencyError(
             f"Module '{module_name}' does not provide attribute '{attribute}'."
         ) from exc
 
+
 def _check_exists(path: Path, error_cls: type[Exception]) -> Path:
     """Ensure that *path* exists and return it."""
-
     if not path.exists():
         raise error_cls(f"Expected file not found: {path}")
     return path
 
-def load_metadata(items_path: Path | str = DATA_DIR / "items.parquet"):
-    """Load item metadata as a pandas ``DataFrame`` indexed by ``track_id``."""
 
+def load_metadata(items_path: Path | str = DATA_DIR / "items.parquet"):
+    """Load item metadata as a pandas ``DataFrame`` indexed by ``track_id``.
+
+    The ingestion pipeline writes a fairly rich schema, but this loader
+    is defensive and only relies on a minimal subset of columns.  It
+    also derives a ``release_year`` column from ``release_date`` if
+    one is not already present.
+    """
     pandas = _import_module("pandas", install_hint="pandas")
     path = _check_exists(_resolve_path(items_path), MissingDataError)
     df = pandas.read_parquet(path)
+
     if "track_id" not in df.columns:
         raise ValueError("Metadata must include a 'track_id' column.")
+
+    # Derive release_year from release_date (YYYY-..)
+    if "release_year" not in df.columns:
+        if "release_date" in df.columns:
+            def _to_year(val):
+                if pandas.isna(val):
+                    return None
+                s = str(val)
+                try:
+                    return int(s[:4])
+                except Exception:
+                    return None
+
+            df["release_year"] = df["release_date"].map(_to_year)
+        else:
+            df["release_year"] = None
+
     return df.set_index("track_id")
+
 
 def build_cf_model(
     interactions_path: Path | str = DATA_DIR / "interactions.parquet",
@@ -104,7 +125,6 @@ def build_cf_model(
     random_state: Optional[int] = 42,
 ) -> Path:
     """Train an implicit ALS model and persist the resulting artefact."""
-
     pandas = _import_module("pandas", install_hint="pandas")
     scipy_sparse = _import_module("scipy.sparse", install_hint="scipy")
     AlternatingLeastSquares = _import_attr(
@@ -154,12 +174,13 @@ def build_cf_model(
     LOGGER.info("ALS model trained and saved to %s", artifact)
     return artifact
 
+
 def load_cf_artifact(artifact_path: Path | str = ARTIFACT_DIR / "als.joblib") -> Dict[str, Any]:
     """Load the persisted ALS factors."""
-
     joblib = _import_module("joblib", install_hint="joblib")
     path = _check_exists(_resolve_path(artifact_path), MissingArtifactError)
     return joblib.load(path)
+
 
 def build_item_embeddings(
     items_path: Path | str = DATA_DIR / "items.parquet",
@@ -169,8 +190,12 @@ def build_item_embeddings(
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     max_chars: int = 1_000,
 ) -> Path:
-    """Create text embeddings for items and persist them."""
+    """Create text embeddings for items and persist them.
 
+    This variant uses sentence-transformers locally; your ingestion
+    pipeline already supports Azure/OpenAI embeddings so this helper
+    is primarily kept for completeness and optional local workflows.
+    """
     pandas = _import_module("pandas", install_hint="pandas")
     numpy = _import_module("numpy", install_hint="numpy")
     SentenceTransformer = _import_attr(
@@ -208,27 +233,27 @@ def build_item_embeddings(
     LOGGER.info("Item embeddings saved to %s", artifact)
     return artifact
 
+
 def load_item_embeddings(artifact_path: Path | str = ARTIFACT_DIR / "item_embs.joblib") -> Dict[str, Any]:
     """Load the saved item embeddings."""
-
     joblib = _import_module("joblib", install_hint="joblib")
     path = _check_exists(_resolve_path(artifact_path), MissingArtifactError)
     return joblib.load(path)
 
+
 def load_sentence_transformer(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
     """Instantiate a sentence-transformer model lazily."""
-
     SentenceTransformer = _import_attr(
         "sentence_transformers", "SentenceTransformer", install_hint="sentence-transformers"
     )
     return SentenceTransformer(model_name)
+
 
 def build_faiss_index(
     embeddings_artifact: Path | str = ARTIFACT_DIR / "item_embs.joblib",
     index_path: Path | str = ARTIFACT_DIR / "item_faiss.index",
 ) -> Path:
     """Create a FAISS index from pre-computed embeddings."""
-
     faiss = _import_module("faiss", install_hint="faiss-cpu")
     numpy = _import_module("numpy", install_hint="numpy")
     joblib_art = load_item_embeddings(embeddings_artifact)
@@ -246,22 +271,23 @@ def build_faiss_index(
     LOGGER.info("FAISS index persisted to %s", path)
     return path
 
+
 def load_faiss_index(index_path: Path | str = ARTIFACT_DIR / "item_faiss.index"):
     """Load the FAISS index for similarity search."""
-
     faiss = _import_module("faiss", install_hint="faiss-cpu")
     path = _check_exists(_resolve_path(index_path), MissingArtifactError)
     return faiss.read_index(str(path))
 
+
 def describe_available_artifacts(artifact_dir: Path | str = ARTIFACT_DIR) -> Dict[str, bool]:
     """Return a quick overview of which artefacts are present on disk."""
-
     directory = _resolve_path(artifact_dir)
     return {
         "als": (directory / "als.joblib").exists(),
         "item_embeddings": (directory / "item_embs.joblib").exists(),
         "faiss_index": (directory / "item_faiss.index").exists(),
     }
+
 
 __all__ = [
     "ARTIFACT_DIR",
@@ -280,4 +306,3 @@ __all__ = [
     "load_faiss_index",
     "describe_available_artifacts",
 ]
-

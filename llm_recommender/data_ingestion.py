@@ -1,4 +1,5 @@
 """
+data_ingestion.py
 Spotify Data Ingestion with PKCE + Embedding-based Query Expansion
 Author: Livan Miranda
 
@@ -18,9 +19,18 @@ This script:
   * Stores rich, FREE metadata only (no /audio-features calls) in:
         - songs.json
         - songs_backup_<timestamp>.json
+  * Builds:
+        - items.parquet / item_text.parquet
+        - embeddings + FAISS index via llm_recommender.model_utils
+
+This version includes:
+  * A Spotify API wrapper with bounded rate-limit handling (no more "stuck forever")
+  * Exponential backoff with max wait per attempt
+  * Centralized retry logic for all Spotify calls (search, playlists, artist, album)
 """
 
 import os
+import sys
 import json
 import math
 import requests
@@ -37,8 +47,15 @@ from typing import List, Dict, Any, Optional, Iterable, Tuple, Set
 
 from dotenv import load_dotenv
 import spotipy
+from spotipy.exceptions import SpotifyException
 import schedule
 import time
+
+import pandas as pd
+from pathlib import Path
+
+# Ensure project root is on sys.path for llm_recommender imports
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Optional / soft dependencies
 try:
@@ -68,6 +85,9 @@ TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
 SONGS_FILE = os.path.join(DATA_DIR, "songs.json")
 LOG_FILE = os.path.join(DATA_DIR, "ingestion.log")
 
+ARTIFACT_DIR = os.path.join(BASE_DIR, "artifacts")
+os.makedirs(ARTIFACT_DIR, exist_ok=True)
+
 # Seed queries you defined
 BASE_SEARCH_QUERIES: List[str] = [
     "lofi chill",
@@ -80,7 +100,7 @@ BASE_SEARCH_QUERIES: List[str] = [
     "classic rock",
 ]
 
-SCOPE = "user-read-private"  # more than enough for our use; we only call free public endpoints
+SCOPE = "user-read-private"  # enough; we only call free public endpoints
 
 # Embedding expansion configuration
 USE_EMBEDDING_EXPANSION = True
@@ -109,6 +129,193 @@ def generate_code_verifier(length: int = 96) -> str:
 def generate_code_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+# ─────────────────────────────────────────────
+# RATE-LIMIT AWARE SPOTIFY WRAPPER
+# ─────────────────────────────────────────────
+def spotify_call_with_retry(fn, *args, **kwargs):
+    """
+    Wrap a spotipy call with bounded rate-limit handling.
+
+    - Catches 429 errors
+    - Uses Retry-After when available, but clamps to max_wait
+    - Exponential backoff on repeated 429s
+    - Raises RuntimeError after max_retries instead of hanging forever
+    """
+    max_retries = 6
+    backoff = 2        # base backoff (seconds)
+    max_wait = 120     # never wait more than 2 minutes per attempt
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+
+        except SpotifyException as e:
+            # 429 = rate limit exceeded
+            if e.http_status == 429:
+                retry_after = getattr(e, "retry_after", None)
+                headers = getattr(e, "headers", {}) or {}
+
+                if retry_after is None:
+                    retry_after = headers.get("Retry-After")
+
+                if retry_after is None:
+                    retry_after = backoff
+
+                try:
+                    retry_after = int(retry_after)
+                except Exception:
+                    retry_after = backoff
+
+                wait = max(3, min(retry_after, max_wait))
+
+                logging.warning(
+                    "Rate limit hit (attempt %s/%s). Waiting %s seconds before retry.",
+                    attempt,
+                    max_retries,
+                    wait,
+                )
+                time.sleep(wait)
+                backoff = min(backoff * 2, max_wait)
+                continue
+
+            # Other Spotify errors: let them bubble
+            logging.exception("SpotifyException in %s: %s", getattr(fn, "__name__", fn), e)
+            raise
+
+        except Exception as e:
+            # Non-Spotify exceptions bubble as usual
+            logging.exception("Non-Spotify exception in %s: %s", getattr(fn, "__name__", fn), e)
+            raise
+
+    logging.error(
+        "Spotify call %s exceeded max retries; giving up.",
+        getattr(fn, "__name__", fn),
+    )
+    raise RuntimeError("Spotify API call exceeded max retries")
+
+
+class SpotifyAPI:
+    """
+    Thin wrapper around spotipy.Spotify that routes all API calls through
+    spotify_call_with_retry, so we own the rate-limit/backoff behavior.
+    """
+
+    def __init__(self, client: spotipy.Spotify):
+        self._client = client
+
+    # --- Search helpers ---
+
+    def search_tracks(self, query: str, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+        return spotify_call_with_retry(
+            self._client.search,
+            q=query,
+            type="track",
+            limit=limit,
+            offset=offset,
+        )
+
+    def search_playlists(self, query: str, limit: int = 5, offset: int = 0) -> Dict[str, Any]:
+        return spotify_call_with_retry(
+            self._client.search,
+            q=query,
+            type="playlist",
+            limit=limit,
+            offset=offset,
+        )
+
+    # --- Playlist helpers ---
+
+    def playlist_tracks(
+        self,
+        playlist_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        return spotify_call_with_retry(
+            self._client.playlist_tracks,
+            playlist_id=playlist_id,
+            limit=limit,
+            offset=offset,
+            additional_types=("track",),
+        )
+
+    # --- Metadata helpers ---
+
+    def artist(self, artist_id: str) -> Dict[str, Any]:
+        return spotify_call_with_retry(self._client.artist, artist_id)
+
+    def album(self, album_id: str) -> Dict[str, Any]:
+        return spotify_call_with_retry(self._client.album, album_id)
+
+
+# ─────────────────────────────────────────────
+# PARQUET + EMBEDDING PIPELINE
+# ─────────────────────────────────────────────
+def persist_items_parquet(tracks: List[Dict[str, Any]]):
+    """Create items.parquet + item_text.parquet used by the recommender."""
+    items = []
+    texts = []
+
+    for t in tracks:
+        items.append(
+            {
+                "track_id": t["track_id"],
+                "title": t["title"],
+                "artist": t["artists"][0] if t["artists"] else None,
+                "album": t["album"],
+                "release_date": t["release_date"],
+                "popularity": t["popularity"],
+                "image_url": t["image_url"],
+            }
+        )
+
+        texts.append(
+            {
+                "track_id": t["track_id"],
+                "title": t["title"],
+                "artist": t["artists"][0] if t["artists"] else None,
+                "genres": ",".join(t.get("artist_meta", {}).get("genres", [])),
+                "tags": "",
+                "description": "",
+            }
+        )
+
+    pd.DataFrame(items).to_parquet(
+        os.path.join(DATA_DIR, "items.parquet"), index=False
+    )
+    pd.DataFrame(texts).to_parquet(
+        os.path.join(DATA_DIR, "item_text.parquet"), index=False
+    )
+
+    print("Saved items.parquet + item_text.parquet")
+
+
+def build_embeddings_and_faiss():
+    """Creates embeddings and FAISS index using your model_utils pipeline."""
+    try:
+        from llm_recommender import model_utils
+
+        # 1. Build embeddings
+        emb_artifact = model_utils.build_item_embeddings(
+            items_path=Path(DATA_DIR) / "items.parquet",
+            text_path=Path(DATA_DIR) / "item_text.parquet",
+            artifact_path=Path(ARTIFACT_DIR) / "item_embs.joblib",
+        )
+
+        # 2. Build FAISS index
+        _ = model_utils.build_faiss_index(
+            embeddings_artifact=emb_artifact,
+            index_path=Path(ARTIFACT_DIR) / "item_faiss.index",
+        )
+
+        print("✓ Embeddings + FAISS index built successfully.")
+        logging.info("Embeddings + FAISS index built.")
+
+    except Exception as exc:
+        logging.exception("Failed to build embeddings + FAISS: %s", exc)
+        print(f"⚠️ Skipped embeddings/FAISS (error: {exc})")
 
 
 # ─────────────────────────────────────────────
@@ -241,9 +448,20 @@ def get_valid_access_token() -> str:
     return token_data["access_token"]
 
 
-def get_spotify_client() -> spotipy.Spotify:
+def get_spotify_client() -> SpotifyAPI:
+    """
+    Build a spotipy client with internal retries disabled and wrap it
+    in our SpotifyAPI so all rate-limit logic is under our control.
+    """
     access_token = get_valid_access_token()
-    return spotipy.Spotify(auth=access_token)
+    raw_client = spotipy.Spotify(
+        auth=access_token,
+        retries=0,          # disable spotipy's long internal retries
+        status_retries=0,
+        backoff_factor=0,
+        requests_timeout=10,
+    )
+    return SpotifyAPI(raw_client)
 
 
 # ─────────────────────────────────────────────
@@ -503,12 +721,12 @@ def resolve_search_queries() -> List[str]:
 # TRACK FLATTENING HELPERS (FREE-ONLY METADATA)
 # ─────────────────────────────────────────────
 def get_or_fetch_artist_meta(
-    sp: spotipy.Spotify, artist_id: str, cache: Dict[str, Dict[str, Any]]
+    api: SpotifyAPI, artist_id: str, cache: Dict[str, Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
     if artist_id in cache:
         return cache[artist_id]
     try:
-        data = sp.artist(artist_id)
+        data = api.artist(artist_id)
         meta = {
             "artist_name": data.get("name"),
             "followers": data.get("followers", {}).get("total"),
@@ -523,12 +741,12 @@ def get_or_fetch_artist_meta(
 
 
 def get_or_fetch_album_meta(
-    sp: spotipy.Spotify, album_id: str, cache: Dict[str, Dict[str, Any]]
+    api: SpotifyAPI, album_id: str, cache: Dict[str, Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
     if album_id in cache:
         return cache[album_id]
     try:
-        data = sp.album(album_id)
+        data = api.album(album_id)
         meta = {
             "album_name": data.get("name"),
             "label": data.get("label"),
@@ -544,7 +762,7 @@ def get_or_fetch_album_meta(
 
 
 def build_track_record(
-    sp: spotipy.Spotify,
+    api: SpotifyAPI,
     track: Dict[str, Any],
     source_query: str,
     source_type: str,
@@ -561,12 +779,12 @@ def build_track_record(
     artist_id = main_artist.get("id")
 
     artist_meta = (
-        get_or_fetch_artist_meta(sp, artist_id, artist_cache) if artist_id else None
+        get_or_fetch_artist_meta(api, artist_id, artist_cache) if artist_id else None
     )
 
     album_id = album.get("id")
     album_meta = (
-        get_or_fetch_album_meta(sp, album_id, album_cache) if album_id else None
+        get_or_fetch_album_meta(api, album_id, album_cache) if album_id else None
     )
 
     images = album.get("images") or []
@@ -599,7 +817,7 @@ def build_track_record(
 # FETCHING TRACKS (SEARCH + PLAYLISTS)
 # ─────────────────────────────────────────────
 def fetch_tracks_from_search(
-    sp: spotipy.Spotify,
+    api: SpotifyAPI,
     query: str,
     seen_ids: Set[str],
     artist_cache: Dict[str, Dict[str, Any]],
@@ -608,7 +826,7 @@ def fetch_tracks_from_search(
 ) -> List[Dict[str, Any]]:
     logging.info("Searching tracks for query: %s", query)
     try:
-        results = sp.search(q=query, type="track", limit=limit)
+        results = api.search_tracks(query=query, limit=limit)
     except Exception as exc:
         logging.warning("Search failed for '%s': %s", query, exc)
         return []
@@ -622,7 +840,7 @@ def fetch_tracks_from_search(
             continue
         try:
             record = build_track_record(
-                sp,
+                api,
                 t,
                 source_query=query,
                 source_type="search",
@@ -643,7 +861,7 @@ def fetch_tracks_from_search(
 
 
 def fetch_tracks_from_playlists(
-    sp: spotipy.Spotify,
+    api: SpotifyAPI,
     query: str,
     seen_ids: Set[str],
     artist_cache: Dict[str, Dict[str, Any]],
@@ -653,7 +871,7 @@ def fetch_tracks_from_playlists(
 ) -> List[Dict[str, Any]]:
     logging.info("Searching playlists for query: %s", query)
     try:
-        results = sp.search(q=query, type="playlist", limit=playlist_limit)
+        results = api.search_playlists(query=query, limit=playlist_limit)
     except Exception as exc:
         logging.warning("Playlist search failed for '%s': %s", query, exc)
         return []
@@ -662,18 +880,22 @@ def fetch_tracks_from_playlists(
     all_records: List[Dict[str, Any]] = []
 
     for pl in playlists:
+        if not pl or not isinstance(pl, dict):
+            logging.warning("Encountered invalid playlist item: %s", pl)
+            continue
+
         pid = pl.get("id")
         pname = pl.get("name")
+
         if not pid:
+            logging.warning("Playlist missing ID: %s", pl)
             continue
 
         logging.info("Fetching tracks from playlist '%s' (%s)", pname, pid)
         try:
-            # Note: this endpoint is free as long as you have a valid access token.
-            tracks_resp = sp.playlist_tracks(
+            tracks_resp = api.playlist_tracks(
                 playlist_id=pid,
                 limit=tracks_per_playlist,
-                additional_types=("track",),
             )
         except Exception as exc:
             logging.warning("Failed to fetch playlist %s (%s): %s", pname, pid, exc)
@@ -688,7 +910,7 @@ def fetch_tracks_from_playlists(
 
             try:
                 record = build_track_record(
-                    sp,
+                    api,
                     track,
                     source_query=query,
                     source_type="playlist",
@@ -715,7 +937,7 @@ def run_ingestion_job() -> int:
     logging.info("Starting Spotify ingestion job...")
     print("Authenticating with Spotify...")
 
-    sp = get_spotify_client()
+    api = get_spotify_client()
 
     # Get base + embedding-expanded queries
     effective_queries = resolve_search_queries()
@@ -732,7 +954,7 @@ def run_ingestion_job() -> int:
     for query in effective_queries:
         # 1) Tracks directly from search
         search_records = fetch_tracks_from_search(
-            sp,
+            api,
             query=query,
             seen_ids=seen_ids,
             artist_cache=artist_cache,
@@ -742,7 +964,7 @@ def run_ingestion_job() -> int:
 
         # 2) Tracks from playlists matching this query
         playlist_records = fetch_tracks_from_playlists(
-            sp,
+            api,
             query=query,
             seen_ids=seen_ids,
             artist_cache=artist_cache,
@@ -761,6 +983,24 @@ def run_ingestion_job() -> int:
 
     print(f"Ingestion complete: {len(all_tracks)} tracks saved.")
     logging.info("Ingestion complete: %d tracks saved.", len(all_tracks))
+
+    # ─────────────────────────────────────────────
+    #  Build parquet files for recommender
+    # ─────────────────────────────────────────────
+    try:
+        persist_items_parquet(all_tracks)
+    except Exception as exc:
+        logging.exception("Failed to save parquet files: %s", exc)
+        print("Could not save parquet files.")
+
+    # ─────────────────────────────────────────────
+    #  Build embeddings + FAISS index
+    # ─────────────────────────────────────────────
+    try:
+        build_embeddings_and_faiss()
+    except Exception as exc:
+        logging.exception("Embedding/FAISS build failed: %s", exc)
+
     return len(all_tracks)
 
 
