@@ -1,39 +1,56 @@
-# config/settings.py
-
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 
-# Load .env locally only ##
-if not os.getenv("AZURE_DEPLOYMENT"):
-    load_dotenv()
+# Load .env when running locally
+load_dotenv()
 
 class Settings:
-    # Server
+    # ─────────────────────────────────────────────
+    # Server Settings
+    # ─────────────────────────────────────────────
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", 8080))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-    # Azure deployment flag
+    # ─────────────────────────────────────────────
+    # Azure Deployment Flag
+    # ─────────────────────────────────────────────
     AZURE_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT", "false").lower() == "true"
 
-    # Azure OpenAI
-    AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-    AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-    AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview")
-    AZURE_OPENAI_EMBED_MODEL = os.getenv("AZURE_OPENAI_EMBED_MODEL", "text-embedding-3-small")
-    AZURE_OPENAI_CHAT_MODEL = os.getenv("AZURE_OPENAI_CHAT_MODEL", "gpt-4o-mini")
+    # ─────────────────────────────────────────────
+    # Azure OpenAI — Embeddings
+    # ─────────────────────────────────────────────
+    AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+    AZURE_OPENAI_API_VERSION = os.getenv(
+        "AZURE_OPENAI_API_VERSION",
+        "2024-12-01-preview"
+    )
 
-    # Spotify (ingestion)
-    SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-    SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
+    # Embedding deployment (text → vector)
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv(
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+        "text-embedding-3-small"
+    )
 
-    # Azure SQL (optional)
-    AZURE_SQL_CONN = os.getenv("AZURE_SQL_CONN", "")
+    # ─────────────────────────────────────────────
+    # Azure OpenAI — Intent LLM (chat completions)
+    # ─────────────────────────────────────────────
+    # Your fine-tuned model should be set here
+    AZURE_OPENAI_CHAT_MODEL = os.getenv(
+        "AZURE_OPENAI_CHAT_MODEL",
+        "gpt-4o-mini-2024-07-18-ft-9af2ed31da034b8a801470c99cf93bfa"
+    )
 
-    BASE_DIR = Path(__file__).resolve().parent.parent
-    STATIC_DIR = BASE_DIR / "static"
-    LOGS_DIR = BASE_DIR / "logs"
-    DATA_DIR = BASE_DIR / "llm_recommender" / "data"
+    # ─────────────────────────────────────────────
+    # Spotify OAuth (used by ingestion)
+    # ─────────────────────────────────────────────
+    SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+    SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+    SPOTIFY_REDIRECT_URI = os.getenv(
+        "SPOTIFY_REDIRECT_URI",
+        "http://127.0.0.1:8888/callback"
+    )
 
+# IMPORTANT — this is what recommender.py imports
 settings = Settings()

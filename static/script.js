@@ -9,6 +9,8 @@ const recommendationsGrid = document.getElementById("recommendations");
 const statusPill = document.querySelector(".status-pill");
 
 const MAX_PROMPT_LENGTH = 280;
+
+// Demo preset prompts
 const presetPrompts = [
     "Introspective hip-hop with dusty drums and string quartets",
     "Cinematic ambient score with analog synth blooms",
@@ -22,23 +24,16 @@ let currentRequestController = null;
 function updateCharCount() {
     const length = promptInput.value.length;
     charCount.textContent = `${length} / ${MAX_PROMPT_LENGTH}`;
-    charCount.dataset.state = length > MAX_PROMPT_LENGTH ? "error" : "ok";
 }
 
 function setLoading(isLoading) {
-    if (!recommendBtn) {
-        return;
-    }
-
     recommendBtn.disabled = isLoading;
     randomBtn.disabled = isLoading;
-    promptInput.setAttribute("aria-busy", String(isLoading));
 
     if (isLoading) {
         feedback.textContent = "Mixing tracks…";
-        feedback.classList.remove("error");
-        recommendBtn.classList.add("is-loading");
         statusPill.textContent = "Fetching";
+        recommendBtn.classList.add("is-loading");
     } else {
         recommendBtn.classList.remove("is-loading");
         statusPill.textContent = "Ready";
@@ -60,36 +55,30 @@ function clearRecommendations() {
         <div class="placeholder" aria-hidden="true">
             <span class="placeholder-icon">✨</span>
             <p>${recommendationsGrid.dataset.emptyLabel}</p>
-        </div>
-    `;
+        </div>`;
     recommendationsGrid.classList.add("empty");
-    showSuccess("");
 }
 
 function surprisePrompt() {
-    const randomPrompt = presetPrompts[Math.floor(Math.random() * presetPrompts.length)];
-    promptInput.value = randomPrompt;
+    const item = presetPrompts[Math.floor(Math.random() * presetPrompts.length)];
+    promptInput.value = item;
     updateCharCount();
 }
 
 function renderRecommendations(payload) {
     recommendationsGrid.innerHTML = "";
-
-    if (!payload || !Array.isArray(payload.recommendations) || payload.recommendations.length === 0) {
-        clearRecommendations();
-        return;
-    }
-
     recommendationsGrid.classList.remove("empty");
 
-    payload.recommendations.forEach((item, index) => {
+    (payload.recommendations || []).forEach((track) => {
         const card = document.createElement("article");
         card.className = "recommendation-card";
+
         card.innerHTML = `
-            <h3>${item.title || `Track ${index + 1}`}</h3>
-            <p class="recommendation-meta">${item.artist || "Unknown artist"} · ${item.genre || "Unclassified"}</p>
-            <p class="recommendation-description">${item.description || item.reason || "No description provided."}</p>
+            <h3>${track.title ?? "Unknown title"}</h3>
+            <p class="recommendation-meta">${track.artist ?? "Unknown artist"} · ${track.release_year ?? ""}</p>
+            <p class="recommendation-description">Score: ${track.score?.toFixed(3) ?? "N/A"}</p>
         `;
+
         recommendationsGrid.appendChild(card);
     });
 }
@@ -103,80 +92,57 @@ async function fetchRecommendations(prompt) {
 
     try {
         setLoading(true);
+
         const response = await fetch("/api/recommend", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt }),
+            body: JSON.stringify({
+                prompt,
+                user_id: "demo_user" // REQUIRED FIX
+            }),
             signal: currentRequestController.signal
         });
 
-        if (response.status === 429) {
-            const retryAfter = response.headers.get("Retry-After");
-            showError(
-                retryAfter
-                    ? `Traffic is busy. Try again in ${retryAfter} seconds.`
-                    : "Traffic is busy. Try again shortly."
-            );
-            return;
-        }
-
         if (!response.ok) {
-            throw new Error(`Server responded with status ${response.status}`);
+            throw new Error(`HTTP ${response.status}`);
         }
 
         const data = await response.json();
         renderRecommendations(data);
-        showSuccess("Here are some tracks to explore.");
-    } catch (error) {
-        if (error.name === "AbortError") {
-            return;
-        }
+        showSuccess("Here are your tracks!");
 
-        console.error(error);
-        showError("We hit a sour note. Please try again.");
+    } catch (err) {
+        if (err.name !== "AbortError") {
+            console.error(err);
+            showError("Something went wrong. Try again.");
+        }
     } finally {
         setLoading(false);
         currentRequestController = null;
     }
 }
 
-promptForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const prompt = promptInput.value.trim();
-
-    if (!prompt) {
-        showError("Drop in a mood, genre mashup, or story first.");
+promptForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = promptInput.value.trim();
+    if (!text) {
+        showError("Tell me a vibe first.");
         return;
     }
-
-    if (prompt.length > MAX_PROMPT_LENGTH) {
-        showError("That prompt is a little long. Try shortening it.");
-        return;
-    }
-
-    fetchRecommendations(prompt);
+    fetchRecommendations(text);
 });
 
-randomBtn?.addEventListener("click", () => {
+randomBtn.addEventListener("click", () => {
     surprisePrompt();
-    promptInput.focus({ preventScroll: true });
 });
 
-resetBtn?.addEventListener("click", () => {
+resetBtn.addEventListener("click", () => {
     promptInput.value = "";
     updateCharCount();
     clearRecommendations();
-    promptInput.focus({ preventScroll: true });
 });
 
-promptInput?.addEventListener("input", updateCharCount);
-
-promptInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        promptForm.requestSubmit();
-    }
-});
+promptInput.addEventListener("input", updateCharCount);
 
 surprisePrompt();
 updateCharCount();

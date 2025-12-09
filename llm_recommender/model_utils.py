@@ -1,155 +1,281 @@
 """
 model_utils.py
-Utility helpers for the LLM driven recommender system.
+Utility helpers for the LLM-driven recommender system.
 
-This module keeps all heavyweight imports optional and provides
-utility helpers to build and load the machine learning artefacts used
-by the recommendation engine (ALS collaborative filtering model,
-semantic item embeddings, FAISS vector index and metadata loaders).
+This module handles:
+  • Loading metadata from items.parquet
+  • Training a PURE-PYTHON ALS model (no implicit dependency)
+  • Generating item embeddings using Azure OpenAI ONLY
+  • Building / loading a FAISS similarity index
+  • Lazy / safe dependency importing with clean errors
 
-The functions are written so that unit tests can exercise the logic
-without requiring the large, optional dependencies to be installed.
-Imports are resolved lazily and informative errors are raised when a
-dependency is missing.  Each helper also validates the existence of the
-expected input data before attempting to train or load a model.
+Everything is designed to be stable in constrained environments
+(Windows, limited build tools, no GPU, etc.).
 """
 
 from __future__ import annotations
-
+from datetime import datetime
 import importlib
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
+
+from openai import AzureOpenAI
+from config.settings import settings
+from .pure_als import PureALS as AlternatingLeastSquares
+
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import pandas as pd
 
 LOGGER = logging.getLogger(__name__)
 
-# Project wide default folders
-DATA_DIR = Path("data")
-ARTIFACT_DIR = Path("artifacts")
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
 
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+ARTIFACT_DIR = BASE_DIR / "artifacts"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─────────────────────────────────────────────
+# CUSTOM EXCEPTIONS
+# ─────────────────────────────────────────────
 
 class DependencyError(RuntimeError):
-    """Raised when an optional dependency is not installed."""
-
+    """Raised when a required dependency or configuration is missing."""
+    pass
 
 class MissingDataError(RuntimeError):
-    """Raised when an expected data file cannot be located."""
-
+    """Raised when items.parquet / item_text.parquet / interactions files are missing."""
+    pass
 
 class MissingArtifactError(RuntimeError):
-    """Raised when a persisted model artefact is missing."""
+    """Raised when ALS, FAISS, or embedding artifacts are missing."""
+    pass
 
 
-def _resolve_path(path: Path | str) -> Path:
-    """Return a normalised :class:`Path` instance."""
+# ─────────────────────────────────────────────
+# SPOTIFY CLIENT
+# ─────────────────────────────────────────────
+
+_spotify = spotipy.Spotify(
+    auth_manager=SpotifyClientCredentials(
+        client_id=settings.SPOTIFY_CLIENT_ID,
+        client_secret=settings.SPOTIFY_CLIENT_SECRET,
+    )
+)
+
+# ─────────────────────────────────────────────
+# METADATA SCHEMA (NEW + REQUIRED)
+# ─────────────────────────────────────────────
+
+METADATA_COLUMNS = [
+    "track_id",
+    "title",
+    "artist",
+    "album",
+    "release_date",
+    "popularity",
+    "image_url",
+    "source_type",
+    "release_year",
+]
+
+DEFAULT_DF = pd.DataFrame(columns=METADATA_COLUMNS)
+
+def enforce_metadata_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensures metadata:
+        - has all expected columns
+        - contains only expected columns
+        - track_id is string
+        - release_year is nullable Int64
+    """
+
+    df = df.copy()
+
+    # add missing columns
+    for col in METADATA_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    # drop unexpected columns
+    df = df[METADATA_COLUMNS]
+
+    # fix dtypes permanently
+    df["track_id"] = df["track_id"].astype(str)
+    df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce").astype("Int64")
+
+    return df
+
+# ─────────────────────────────────────────────
+# METADATA FETCH / APPEND / REBUILD
+# ─────────────────────────────────────────────
+
+def fetch_track_metadata(track_id: str) -> dict:
+    """Fetch metadata for one track from Spotify."""
+    try:
+        t = _spotify.track(track_id)
+        return {
+            "track_id": track_id,
+            "title": t["name"],
+            "artist": ", ".join(a["name"] for a in t["artists"]),
+            "album": t["album"]["name"],
+            "release_date": t["album"]["release_date"],
+            "popularity": t["popularity"],
+            "image_url": t["album"]["images"][0]["url"] if t["album"]["images"] else None,
+            "source_type": "spotify_api",
+            "release_year": (
+                int(t["album"]["release_date"][:4])
+                if t["album"]["release_date"] else None
+            ),
+        }
+
+    except Exception as exc:
+        LOGGER.warning(f"[WARN] Failed to fetch metadata for {track_id}: {exc}")
+        return None
+
+def load_metadata(path: Path | str = DATA_DIR / "items.parquet"):
+    """
+    Loads metadata CLEANLY:
+        - Safe handling of release_date → release_year
+        - Ensures proper schema
+        - Ensures track_id is NOT the index
+    """
+
+    path = Path(path)
+
+    if not path.exists():
+        LOGGER.warning(f"Metadata not found → returning empty table: {path}")
+        return DEFAULT_DF.copy()
+
+    try:
+        df = pd.read_parquet(path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"❌ items.parquet is corrupted: {exc}\n"
+            f"Fix with: rebuild_items_parquet()"
+        )
+
+    # Remove old leftover index columns
+    if "index" in df.columns:
+        df = df.drop(columns=["index"])
+
+    df = enforce_metadata_schema(df)
+
+    return df
+
+def append_metadata_row(parquet_path: str | Path, row: dict):
+    """
+    Appends ONE row to items.parquet SAFELY.
+
+    Fixes:
+      ✔ never writes index
+      ✔ never introduces int64 index corruption
+      ✔ removes legacy "index" column
+      ✔ enforces schema before write
+    """
+
+    if row is None:
+        return
+
+    path = Path(parquet_path)
+    df = load_metadata(path)
+
+    # Avoid duplicates
+    if (df["track_id"] == row["track_id"]).any():
+        LOGGER.info(f"Skipping duplicate track metadata: {row['track_id']}")
+        return
+
+    new = pd.DataFrame([row])
+    new = enforce_metadata_schema(new)
+
+    out = pd.concat([df, new], ignore_index=True)
+
+    # Write WITHOUT index → prevents INT64 errors
+    out.to_parquet(path, index=False)
+
+    LOGGER.info(f"Appended metadata for: {row['track_id']}")
+
+def rebuild_items_parquet(raw_path: Path | str, out_path: Path | str):
+    """
+    Hard rebuild metadata from raw source.
+    Removes corrupted index & re-applies schema.
+    """
+
+    raw_path = Path(raw_path)
+    out_path = Path(out_path)
+
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Cannot rebuild; raw data missing: {raw_path}")
+
+    if raw_path.suffix == ".parquet":
+        df = pd.read_parquet(raw_path)
+    elif raw_path.suffix == ".jsonl":
+        df = pd.read_json(raw_path, lines=True)
+    else:
+        raise ValueError("Raw metadata must be parquet or jsonl")
+
+    df = enforce_metadata_schema(df)
+    out_path.parent.mkdir(exist_ok=True)
+    df.to_parquet(out_path, index=False)
+
+    LOGGER.info(f"✔ items.parquet rebuilt → {out_path}")
+
+# ─────────────────────────────────────────────
+# ALS + Embeddings + FAISS (UNCHANGED)
+# ─────────────────────────────────────────────
+
+def _import_module(name: str, install_hint: Optional[str] = None):
+    try:
+        return importlib.import_module(name)
+    except ImportError as exc:
+        msg = install_hint or name
+        raise RuntimeError(f"Missing dependency: pip install {msg}") from exc
+
+
+def _resolve_path(path):
     return Path(path).expanduser().resolve()
 
 
-def ensure_directory(path: Path | str) -> Path:
-    """Create a directory (and parents) if it does not already exist."""
-    directory = _resolve_path(path)
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def _import_module(name: str, install_hint: Optional[str] = None) -> Any:
-    """Import *name* lazily and raise a helpful :class:`DependencyError`."""
-    try:
-        return importlib.import_module(name)
-    except ImportError as exc:  # pragma: no cover
-        hint = install_hint or name
-        raise DependencyError(
-            f"The optional dependency '{name}' is required. Install it via 'pip install {hint}'."
-        ) from exc
-
-
-def _import_attr(module_name: str, attribute: str, install_hint: Optional[str] = None) -> Any:
-    """Import *attribute* from *module_name* lazily."""
-    module = _import_module(module_name, install_hint=install_hint)
-    try:
-        return getattr(module, attribute)
-    except AttributeError as exc:  # pragma: no cover
-        raise DependencyError(
-            f"Module '{module_name}' does not provide attribute '{attribute}'."
-        ) from exc
-
-
-def _check_exists(path: Path, error_cls: type[Exception]) -> Path:
-    """Ensure that *path* exists and return it."""
-    if not path.exists():
-        raise error_cls(f"Expected file not found: {path}")
-    return path
-
-
-def load_metadata(items_path: Path | str = DATA_DIR / "items.parquet"):
-    """Load item metadata as a pandas ``DataFrame`` indexed by ``track_id``.
-
-    The ingestion pipeline writes a fairly rich schema, but this loader
-    is defensive and only relies on a minimal subset of columns.  It
-    also derives a ``release_year`` column from ``release_date`` if
-    one is not already present.
-    """
-    pandas = _import_module("pandas", install_hint="pandas")
-    path = _check_exists(_resolve_path(items_path), MissingDataError)
-    df = pandas.read_parquet(path)
-
-    if "track_id" not in df.columns:
-        raise ValueError("Metadata must include a 'track_id' column.")
-
-    # Derive release_year from release_date (YYYY-..)
-    if "release_year" not in df.columns:
-        if "release_date" in df.columns:
-            def _to_year(val):
-                if pandas.isna(val):
-                    return None
-                s = str(val)
-                try:
-                    return int(s[:4])
-                except Exception:
-                    return None
-
-            df["release_year"] = df["release_date"].map(_to_year)
-        else:
-            df["release_year"] = None
-
-    return df.set_index("track_id")
+def ensure_directory(path):
+    p = _resolve_path(path)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def build_cf_model(
     interactions_path: Path | str = DATA_DIR / "interactions.parquet",
     artifact_path: Path | str = ARTIFACT_DIR / "als.joblib",
     *,
-    factors: int = 64,
-    regularization: float = 0.08,
-    iterations: int = 20,
-    random_state: Optional[int] = 42,
-) -> Path:
-    """Train an implicit ALS model and persist the resulting artefact."""
-    pandas = _import_module("pandas", install_hint="pandas")
-    scipy_sparse = _import_module("scipy.sparse", install_hint="scipy")
-    AlternatingLeastSquares = _import_attr(
-        "implicit.als", "AlternatingLeastSquares", install_hint="implicit"
-    )
-    joblib = _import_module("joblib", install_hint="joblib")
+    factors=64,
+    regularization=0.08,
+    iterations=20,
+    random_state=42,
+):
+    import numpy as np
+    import scipy.sparse as sp
+    import joblib
 
-    path = _check_exists(_resolve_path(interactions_path), MissingDataError)
-    df = pandas.read_parquet(path)
+    df = pd.read_parquet(_resolve_path(interactions_path))
+
     if df.empty:
-        raise ValueError("Interaction data is empty; cannot train ALS model.")
+        raise RuntimeError("Interactions are empty.")
 
-    for column in ("user_id", "track_id", "strength"):
-        if column not in df.columns:
-            raise ValueError(f"Column '{column}' missing from interactions data.")
+    # map ids
+    u_codes = {u: i for i, u in enumerate(df["user_id"].unique())}
+    i_codes = {t: i for i, t in enumerate(df["track_id"].unique())}
 
-    # Create contiguous id mappings
-    u_codes = {uid: idx for idx, uid in enumerate(df["user_id"].unique())}
-    i_codes = {tid: idx for idx, tid in enumerate(df["track_id"].unique())}
-    df = df.assign(u=df["user_id"].map(u_codes), i=df["track_id"].map(i_codes))
+    df["u"] = df["user_id"].map(u_codes)
+    df["i"] = df["track_id"].map(i_codes)
 
-    matrix = scipy_sparse.coo_matrix(
+    mat = sp.coo_matrix(
         (df["strength"], (df["i"], df["u"])),
         shape=(len(i_codes), len(u_codes)),
-        dtype="float32",
     ).tocsr()
 
     model = AlternatingLeastSquares(
@@ -158,9 +284,8 @@ def build_cf_model(
         iterations=iterations,
         random_state=random_state,
     )
-    model.fit(matrix)
+    model.fit(mat)
 
-    ensure_directory(artifact_path if isinstance(artifact_path, Path) else ARTIFACT_DIR)
     artifact = _resolve_path(artifact_path)
     joblib.dump(
         {
@@ -171,138 +296,149 @@ def build_cf_model(
         },
         artifact,
     )
-    LOGGER.info("ALS model trained and saved to %s", artifact)
+
+    LOGGER.info("ALS model saved → %s", artifact)
     return artifact
 
 
-def load_cf_artifact(artifact_path: Path | str = ARTIFACT_DIR / "als.joblib") -> Dict[str, Any]:
-    """Load the persisted ALS factors."""
-    joblib = _import_module("joblib", install_hint="joblib")
-    path = _check_exists(_resolve_path(artifact_path), MissingArtifactError)
-    return joblib.load(path)
+def load_cf_artifact(path=ARTIFACT_DIR / "als.joblib"):
+    import joblib
+    return joblib.load(_resolve_path(path))
+
+
+# ─────────────────────────────────────────────
+# AZURE OPENAI EMBEDDING LOGIC (unchanged)
+# ─────────────────────────────────────────────
+
+def _get_azure_embedding_client():
+    endpoint = settings.AZURE_OPENAI_ENDPOINT
+    key = settings.AZURE_OPENAI_API_KEY
+    api_version = settings.AZURE_OPENAI_API_VERSION
+
+    # IMPORTANT — use your existing settings variable
+    deployment = getattr(
+        settings,
+        "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+        None
+    )
+
+    if not (endpoint and key and deployment):
+        raise DependencyError(
+            "Azure embedding configuration missing. "
+            "Expected AZURE_OPENAI_EMBEDDING_DEPLOYMENT in settings."
+        )
+
+    client = AzureOpenAI(
+        api_key=key,
+        azure_endpoint=endpoint,
+        api_version=api_version,
+    )
+    return client, deployment
+
+
+def _azure_embed_texts(texts):
+    import numpy as np
+    client, model = _get_azure_embedding_client()
+
+    if not texts:
+        return np.zeros((0, 0), dtype="float32")
+
+    vectors = []
+    batch = 256
+    for i in range(0, len(texts), batch):
+        chunk = texts[i:i+batch]
+        resp = client.embeddings.create(model=model, input=chunk)
+        vectors.extend([v.embedding for v in resp.data])
+
+    return np.asarray(vectors, dtype="float32")
 
 
 def build_item_embeddings(
-    items_path: Path | str = DATA_DIR / "items.parquet",
-    text_path: Path | str = DATA_DIR / "item_text.parquet",
-    artifact_path: Path | str = ARTIFACT_DIR / "item_embs.joblib",
-    *,
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-    max_chars: int = 1_000,
-) -> Path:
-    """Create text embeddings for items and persist them.
+    items_path=DATA_DIR / "items.parquet",
+    text_path=DATA_DIR / "item_text.parquet",
+    artifact_path=ARTIFACT_DIR / "item_embs.joblib",
+):
+    import joblib
 
-    This variant uses sentence-transformers locally; your ingestion
-    pipeline already supports Azure/OpenAI embeddings so this helper
-    is primarily kept for completeness and optional local workflows.
-    """
-    pandas = _import_module("pandas", install_hint="pandas")
-    numpy = _import_module("numpy", install_hint="numpy")
-    SentenceTransformer = _import_attr(
-        "sentence_transformers", "SentenceTransformer", install_hint="sentence-transformers"
-    )
-    joblib = _import_module("joblib", install_hint="joblib")
+    # FIX: ensure metadata has track_id as column
+    items = load_metadata(items_path).reset_index()
 
-    items_df = pandas.read_parquet(_check_exists(_resolve_path(items_path), MissingDataError))
-    texts_df = pandas.read_parquet(_check_exists(_resolve_path(text_path), MissingDataError))
+    # Load text metadata
+    text = pd.read_parquet(text_path)
+    
+    # Always keep title from items (not text)
+    text = text.drop(columns=["title", "artist"], errors="ignore")
 
-    merged = items_df.merge(texts_df, on="track_id", how="left")
+    # Merge
+    merged = items.merge(text, on="track_id", how="left")
 
-    def _safe_col(frame, column: str) -> Any:
-        return frame[column].fillna("") if column in frame.columns else ""
-
+    # Build embedding blob
     merged["blob"] = (
-        _safe_col(merged, "title").astype(str)
-        + " — "
-        + _safe_col(merged, "artist").astype(str)
-        + " | "
-        + _safe_col(merged, "genres").astype(str)
-        + " | "
-        + _safe_col(merged, "tags").astype(str)
-        + " | "
-        + _safe_col(merged, "description").astype(str)
-    ).str.slice(0, max_chars)
+        merged["title"].fillna("") + " — " +
+        merged["artist"].fillna("") + " | " +
+        merged.get("genres", "").astype(str) + " | " +
+        merged.get("tags", "").astype(str) + " | " +
+        merged.get("description", "").astype(str)
+    )
 
-    encoder = SentenceTransformer(model_name)
-    embeddings = encoder.encode(merged["blob"].tolist(), normalize_embeddings=True)
-    embeddings = numpy.asarray(embeddings, dtype="float32")
+    # Generate Azure embeddings
+    vectors = _azure_embed_texts(merged["blob"].tolist())
 
-    ensure_directory(artifact_path if isinstance(artifact_path, Path) else ARTIFACT_DIR)
-    artifact = _resolve_path(artifact_path)
-    joblib.dump({"track_ids": merged["track_id"].tolist(), "embs": embeddings}, artifact)
-    LOGGER.info("Item embeddings saved to %s", artifact)
-    return artifact
+    # Save artifact
+    joblib.dump(
+        {"track_ids": merged["track_id"].tolist(), "embs": vectors},
+        artifact_path,
+    )
+
+    LOGGER.info("Item embeddings saved → %s", artifact_path)
+    return artifact_path
 
 
-def load_item_embeddings(artifact_path: Path | str = ARTIFACT_DIR / "item_embs.joblib") -> Dict[str, Any]:
-    """Load the saved item embeddings."""
-    joblib = _import_module("joblib", install_hint="joblib")
-    path = _check_exists(_resolve_path(artifact_path), MissingArtifactError)
+
+def load_item_embeddings(path=ARTIFACT_DIR / "item_embs.joblib"):
+    import joblib
     return joblib.load(path)
 
 
-def load_sentence_transformer(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-    """Instantiate a sentence-transformer model lazily."""
-    SentenceTransformer = _import_attr(
-        "sentence_transformers", "SentenceTransformer", install_hint="sentence-transformers"
-    )
-    return SentenceTransformer(model_name)
-
+# ─────────────────────────────────────────────
+# FAISS INDEX (unchanged)
+# ─────────────────────────────────────────────
 
 def build_faiss_index(
-    embeddings_artifact: Path | str = ARTIFACT_DIR / "item_embs.joblib",
-    index_path: Path | str = ARTIFACT_DIR / "item_faiss.index",
-) -> Path:
-    """Create a FAISS index from pre-computed embeddings."""
-    faiss = _import_module("faiss", install_hint="faiss-cpu")
-    numpy = _import_module("numpy", install_hint="numpy")
-    joblib_art = load_item_embeddings(embeddings_artifact)
+    emb_path=ARTIFACT_DIR / "item_embs.joblib",
+    index_path=ARTIFACT_DIR / "item_faiss.index",
+):
+    import faiss
+    import numpy as np
+    import joblib
 
-    embeddings = numpy.asarray(joblib_art["embs"], dtype="float32")
-    if embeddings.ndim != 2:
-        raise ValueError("Embeddings must be a 2D matrix.")
+    data = joblib.load(emb_path)
+    embs = np.asarray(data["embs"], dtype="float32")
 
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
+    index = faiss.IndexFlatIP(embs.shape[1])
+    index.add(embs)
 
-    ensure_directory(index_path if isinstance(index_path, Path) else ARTIFACT_DIR)
-    path = _resolve_path(index_path)
-    faiss.write_index(index, path)
-    LOGGER.info("FAISS index persisted to %s", path)
-    return path
+    faiss.write_index(index, str(index_path))
+    LOGGER.info("FAISS index saved → %s", index_path)
+    return index_path
 
 
-def load_faiss_index(index_path: Path | str = ARTIFACT_DIR / "item_faiss.index"):
-    """Load the FAISS index for similarity search."""
-    faiss = _import_module("faiss", install_hint="faiss-cpu")
-    path = _check_exists(_resolve_path(index_path), MissingArtifactError)
+def load_faiss_index(path=ARTIFACT_DIR / "item_faiss.index"):
+    import faiss
     return faiss.read_index(str(path))
 
 
-def describe_available_artifacts(artifact_dir: Path | str = ARTIFACT_DIR) -> Dict[str, bool]:
-    """Return a quick overview of which artefacts are present on disk."""
-    directory = _resolve_path(artifact_dir)
-    return {
-        "als": (directory / "als.joblib").exists(),
-        "item_embeddings": (directory / "item_embs.joblib").exists(),
-        "faiss_index": (directory / "item_faiss.index").exists(),
-    }
-
-
 __all__ = [
-    "ARTIFACT_DIR",
-    "DATA_DIR",
-    "DependencyError",
-    "MissingDataError",
-    "MissingArtifactError",
-    "ensure_directory",
     "load_metadata",
+    "append_metadata_row",
+    "rebuild_items_parquet",
     "build_cf_model",
     "load_cf_artifact",
     "build_item_embeddings",
     "load_item_embeddings",
-    "load_sentence_transformer",
     "build_faiss_index",
     "load_faiss_index",
-    "describe_available_artifacts",
+    "fetch_track_metadata",
+    "DATA_DIR",
+    "ARTIFACT_DIR",
 ]

@@ -1,126 +1,72 @@
 """
 recommender.py
-Recommendation engine that wires together the hybrid retrieval stack.
+Hybrid LLM + CF + Azure Embeddings Recommendation Engine
+Author: Livan Miranda
 
-The implementation mirrors the design sketched in the project plan:
+This engine connects:
+  * ALS collaborative filtering (Pure Python ALS in model_utils)
+  * Semantic similarity via FAISS + Azure embeddings
+  * LLM intent parsing (Azure: chat.completions)
+  * Metadata + intent-based ranking
 
-* Collaborative filtering via an implicit ALS model trained on historic
-  interactions.
-* Semantic retrieval via sentence-transformer embeddings and a FAISS
-  index for approximate nearest neighbours.
-* An LLM-powered intent parser (Azure/OpenAI) that produces structured
-  signals from natural-language queries.
-* A ranking step that merges collaborative and semantic candidates,
-  applies metadata + intent heuristics, and produces the final playlist.
-
-All heavy resources (artefacts and ML models) are loaded lazily the
-first time the engine is used.  If any component is missing the engine
-falls back to a deterministic rule-based response, ensuring the public
-API keeps functioning even in constrained environments.
+This version is aligned with config.settings and your Azure setup.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import threading
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 from datetime import datetime
-import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from pydantic import BaseModel, Field
 
+from openai import AzureOpenAI
+from config.settings import settings
 from . import model_utils
 
 LOGGER = logging.getLogger(__name__)
 
-# Optional LLM clients (Azure/OpenAI)
-try:
-    from openai import AzureOpenAI, OpenAI  # type: ignore
-except ImportError:  # pragma: no cover
-    AzureOpenAI = None
-    OpenAI = None
+# ─────────────────────────────────────────────
+# Azure Clients
+# ─────────────────────────────────────────────
 
-_INTENT_CLIENT = None
-_INTENT_BACKEND: Optional[str] = None
+AZURE_EMB_CLIENT = AzureOpenAI(
+    api_key=settings.AZURE_OPENAI_API_KEY,
+    azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+    api_version=settings.AZURE_OPENAI_API_VERSION,
+)
+
+AZURE_EMBED_MODEL = settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+
+AZURE_CHAT_CLIENT = AzureOpenAI(
+    api_key=settings.AZURE_OPENAI_API_KEY,
+    azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+    api_version=settings.AZURE_OPENAI_API_VERSION,
+)
+
+AZURE_CHAT_MODEL = settings.AZURE_OPENAI_CHAT_MODEL  # can be base or fine-tuned
 
 
-def get_intent_client():
-    """
-    Lazy initialise an LLM client for intent parsing.
-
-    Preference order:
-      1. Azure OpenAI (classic) via AZURE_OPENAI_* env vars
-      2. OpenAI via OPENAI_API_KEY
-      3. None (falls back to heuristic parse_nl)
-    """
-    global _INTENT_CLIENT, _INTENT_BACKEND
-
-    if _INTENT_CLIENT is not None:
-        return _INTENT_CLIENT
-
-    # Try Azure first
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-    azure_intent_deployment = os.getenv("AZURE_OPENAI_INTENT_DEPLOYMENT")
-
-    if AzureOpenAI and azure_endpoint and azure_key and azure_intent_deployment:
-        try:
-            client = AzureOpenAI(
-                api_key=azure_key,
-                azure_endpoint=azure_endpoint,
-                api_version=azure_api_version,
-            )
-            _INTENT_CLIENT = client
-            _INTENT_BACKEND = "azure"
-            LOGGER.info(
-                "LLM intent parser: using Azure OpenAI (deployment=%s)",
-                azure_intent_deployment,
-            )
-            return _INTENT_CLIENT
-        except Exception as exc:  # pragma: no cover
-            LOGGER.warning("Failed to initialise Azure OpenAI intent client: %s", exc)
-
-    # Fallback: public OpenAI
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if OpenAI and openai_key:
-        try:
-            client = OpenAI(api_key=openai_key)
-            _INTENT_CLIENT = client
-            _INTENT_BACKEND = "openai"
-            LOGGER.info("LLM intent parser: using OpenAI.")
-            return _INTENT_CLIENT
-        except Exception as exc:  # pragma: no cover
-            LOGGER.warning("Failed to initialise OpenAI intent client: %s", exc)
-
-    LOGGER.warning("No LLM backend available for intent parsing; using heuristic parser.")
-    _INTENT_CLIENT = None
-    _INTENT_BACKEND = None
-    return None
-
+# ─────────────────────────────────────────────
+# Intent Structures
+# ─────────────────────────────────────────────
 
 class Range(BaseModel):
-    """Numeric range used for user intent preferences."""
-
-    min: Optional[float] = Field(default=None)
-    max: Optional[float] = Field(default=None)
+    min: Optional[float] = None
+    max: Optional[float] = None
 
 
 class Era(BaseModel):
-    """Time range helper for intent parsing."""
-
-    from_year: Optional[int] = Field(default=None)
-    to_year: Optional[int] = Field(default=None)
+    from_year: Optional[int] = None
+    to_year: Optional[int] = None
 
 
 class Intent(BaseModel):
-    """Structured representation of the LLM extracted query intent."""
-
     moods: List[str] = Field(default_factory=list)
     avoid_vocals: bool = False
     genres: List[str] = Field(default_factory=list)
@@ -131,426 +77,477 @@ class Intent(BaseModel):
     exclude_artists: List[str] = Field(default_factory=list)
 
 
-def parse_nl(query: str) -> Intent:
-    """Extremely small heuristic parser used as a fallback."""
+# ─────────────────────────────────────────────
+# Helpers: numpy → native Python
+# ─────────────────────────────────────────────
 
+def _to_python(obj: Any) -> Any:
+    """Recursively convert numpy scalars / arrays into native Python types."""
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return [_to_python(x) for x in obj.tolist()]
+    if isinstance(obj, dict):
+        return {k: _to_python(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_python(x) for x in obj]
+    return obj
+
+
+# ─────────────────────────────────────────────
+# Heuristic fallback parser
+# ─────────────────────────────────────────────
+
+def parse_nl_heuristic(query: str) -> Intent:
+    """Emergency fallback for when Azure LLM fails."""
     q = (query or "").lower()
     mood = ""
-    if any(token in q for token in ("chill", "study", "focus")):
+
+    if any(t in q for t in ["chill", "study", "focus"]):
         mood = "chill"
-    elif "workout" in q or "run" in q or "gym" in q:
+    elif any(t in q for t in ["workout", "gym", "run"]):
         mood = "energetic"
-    avoid_vocals = ("no vocals" in q) or ("instrumental" in q)
-    return Intent(moods=[mood] if mood else [], avoid_vocals=avoid_vocals)
+    elif "jazz" in q:
+        mood = "relaxed"
 
+    avoid_vocals = "instrumental" in q or "no vocals" in q
 
-def parse_nl_llm(query: str) -> Intent:
-    """
-    LLM-powered intent extraction.
+    era = Era()
+    # Very rough heuristic for era if decade mentioned
+    if "1960" in q or "60s" in q or "60's" in q:
+        era = Era(from_year=1960, to_year=1969)
+    if "2010" in q or "2010s" in q:
+        era = Era(from_year=2010, to_year=2019)
 
-    If Azure/OpenAI is unavailable or fails, falls back to the heuristic parser.
-    """
-    if not query:
-        return Intent()
-
-    client = get_intent_client()
-    if not client:
-        return parse_nl(query)
-
-    # Decide model / deployment based on backend
-    if _INTENT_BACKEND == "azure":
-        model_name = os.getenv("AZURE_OPENAI_INTENT_DEPLOYMENT")
-    elif _INTENT_BACKEND == "openai":
-        model_name = os.getenv("OPENAI_INTENT_MODEL", "gpt-4o-mini")
-    else:
-        model_name = None
-
-    if not model_name:
-        return parse_nl(query)
-
-    system_msg = (
-        "You are a music intent parser. Extract structured metadata from a user music "
-        "request. Respond ONLY with valid JSON object matching this schema:\n\n"
-        "{\n"
-        '  "moods": ["chill", "energetic"],\n'
-        '  "genres": ["lofi", "jazz"],\n'
-        '  "avoid_vocals": true,\n'
-        '  "era": {"from_year": 2000, "to_year": 2020},\n'
-        '  "include_artists": ["artist1"],\n'
-        '  "exclude_artists": []\n'
-        "}\n"
+    return Intent(
+        moods=[mood] if mood else [],
+        avoid_vocals=avoid_vocals,
+        era=era,
     )
 
-    user_msg = f'User query: "{query}"'
+
+# ─────────────────────────────────────────────
+# Intent parsing via Azure Chat Completions
+# ─────────────────────────────────────────────
+
+def _extract_json_from_text(text: str) -> dict:
+    """
+    Extracts JSON from model output.
+    Handles:
+      - code fences (```json ... ```)
+      - extra explanations
+      - leading/trailing whitespace
+    """
+    text = text.strip()
+
+    # Strip code fences if present
+    if text.startswith("```"):
+        # remove ```json or ``` and ending ```
+        text = text.strip("`")
+        # crude but effective:
+        if text.startswith("json"):
+            text = text[4:].strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        return json.loads(text)
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1:
+        return json.loads(text[start:end + 1])
+
+    raise ValueError(f"Malformed JSON from LLM: {text}")
+
+
+def _sanitize_intent_json(data: dict) -> dict:
+    """Cleans LLM JSON output: dedupe, trim, fix invalid ranges & era."""
+    def clean_list(lst, limit=5):
+        out: List[str] = []
+        for x in lst or []:
+            s = str(x).strip().lower()
+            if s and s not in out:
+                out.append(s)
+            if len(out) >= limit:
+                break
+        return out
+
+    # Lists
+    for field in ["moods", "genres", "include_artists", "exclude_artists"]:
+        data[field] = clean_list(data.get(field, []))
+
+    # Ranges
+    for field, default_hi in [("energy", 1.0), ("tempo_bpm", 200.0)]:
+        rng = data.get(field) or {}
+        try:
+            lo = float(rng.get("min", 0))
+            hi = float(rng.get("max", default_hi))
+            if lo > hi:
+                lo, hi = hi, lo
+            data[field] = {"min": lo, "max": hi}
+        except Exception:
+            data[field] = {"min": 0.0, "max": default_hi}
+
+    # Era
+    era = data.get("era") or {}
+    fy = era.get("from_year")
+    ty = era.get("to_year")
+    try:
+        fy = int(fy) if fy is not None else None
+        ty = int(ty) if ty is not None else None
+    except Exception:
+        fy, ty = None, None
+
+    if fy is not None and ty is not None and fy > ty:
+        fy, ty = ty, fy
+
+    data["era"] = {"from_year": fy, "to_year": ty}
+
+    return data
+
+
+def parse_nl_llm(text: str) -> Intent:
+    """
+    Uses Azure ChatCompletion to extract structured intent.
+    Prints RAW LLM response for debugging, then parses & normalizes JSON.
+    Falls back to heuristic parser on any error.
+    """
+    if not text:
+        return Intent()  # empty intent
 
     try:
-        resp = client.responses.create(
-            model=model_name,
-            input=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
+        resp = AZURE_CHAT_CLIENT.chat.completions.create(
+            model=AZURE_CHAT_MODEL,
+            temperature=0,
+            max_tokens=400,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a music intent parser. "
+                        "Return ONLY JSON, no additional text. "
+                        "Schema:\n"
+                        "{\n"
+                        '  "moods": [string],\n'
+                        '  "avoid_vocals": boolean,\n'
+                        '  "genres": [string],\n'
+                        '  "energy": {"min": number, "max": number},\n'
+                        '  "tempo_bpm": {"min": number, "max": number},\n'
+                        '  "era": {"from_year": number|null, "to_year": number|null},\n'
+                        '  "include_artists": [string],\n'
+                        '  "exclude_artists": [string]\n'
+                        "}\n"
+                    ),
+                },
+                {"role": "user", "content": text},
             ],
         )
-        # unified response API: first output, first content block
-        text = resp.output[0].content[0].text
-        data = json.loads(text)
-        return Intent(**data)
-    except Exception as exc:  # pragma: no cover
-        LOGGER.warning("LLM intent parsing failed, falling back to heuristic: %s", exc)
-        return parse_nl(query)
+
+        raw = resp.choices[0].message.content
+
+        # Debug output
+        print("\n========== RAW LLM RESPONSE ==========\n")
+        print(raw)
+        print("\n======================================\n")
+
+        data = _extract_json_from_text(raw)
+        data = _sanitize_intent_json(data)
+
+        # Build Intent from normalized dict
+        return Intent.parse_obj(data)
+
+    except Exception as e:
+        print(f"LLM intent parsing failed → heuristic used. Error: {e}")
+        return parse_nl_heuristic(text)
 
 
-_NUMPY = None
-
-
-def _get_numpy():
-    global _NUMPY
-    if _NUMPY is None:
-        try:
-            _NUMPY = importlib.import_module("numpy")
-        except ImportError as exc:  # pragma: no cover - exercised in fallback path
-            raise model_utils.DependencyError("numpy is required for recommendation features.") from exc
-    return _NUMPY
-
+# ─────────────────────────────────────────────
+# Retrieval
+# ─────────────────────────────────────────────
 
 @dataclass
 class RetrievalResult:
-    """Wrapper around candidate identifiers and their scores."""
-
-    ids: Any
-    scores: Any
-
-    def as_lists(self) -> Tuple[List[str], List[float]]:
-        np = _get_numpy()
-        return np.asarray(self.ids).tolist(), np.asarray(self.scores, dtype=float).tolist()
+    ids: np.ndarray
+    scores: np.ndarray
 
 
 class HybridRetriever:
-    """Combine collaborative filtering and semantic similarity search."""
+    """Semantic (Azure embeddings + FAISS) + CF retrieval."""
 
     def __init__(self, artifact_dir: Path | str = model_utils.ARTIFACT_DIR):
         artifact_dir = Path(artifact_dir)
-        np = _get_numpy()
 
-        # Load semantic artefacts (embeddings + FAISS index)
-        item_art = model_utils.load_item_embeddings(artifact_dir / "item_embs.joblib")
-        self.item_ids = np.asarray(item_art["track_ids"])
+        # Load semantic artifacts
+        emb = model_utils.load_item_embeddings(artifact_dir / "item_embs.joblib")
+        # Enforce pure string IDs
+        self.item_ids = np.asarray([str(t) for t in emb["track_ids"]], dtype=object)
         self.index = model_utils.load_faiss_index(artifact_dir / "item_faiss.index")
 
-        # Encoder used for query -> embedding
-        self.encoder = model_utils.load_sentence_transformer(
-            "sentence-transformers/all-MiniLM-L6-v2"
-        )
-
-        # Load collaborative filtering factors (ALS)
+        # Load CF artifacts
         als = model_utils.load_cf_artifact(artifact_dir / "als.joblib")
         self.user_factors = als["user_factors"]
         self.item_factors = als["item_factors"]
-        self.u_codes = als["u_codes"]
-        self.i_codes = als["i_codes"]
-        self._idx_to_track = {idx: tid for tid, idx in self.i_codes.items()}
 
-    # Collaborative filtering -------------------------------------------------
+        # Normalize keys to str for safety
+        self.u_codes = {str(k): v for k, v in als["u_codes"].items()}
+        self.i_codes = {str(k): v for k, v in als["i_codes"].items()}
+
+        # Reverse lookup: idx → track_id (string)
+        self._idx_to_track = {idx: str(tid) for tid, idx in self.i_codes.items()}
+
+    # CF retrieval
     def by_cf(self, user_id: str, k: int = 200) -> RetrievalResult:
-        np = _get_numpy()
+        user_id = str(user_id)
         if user_id not in self.u_codes:
-            return RetrievalResult(np.array([]), np.array([]))
+            return RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
 
         uidx = self.u_codes[user_id]
+        # item_factors: (n_items, factors), user_factors: (n_users, factors)
         scores = self.item_factors @ self.user_factors[uidx]
-        if scores.size == 0:
-            return RetrievalResult(np.array([]), np.array([]))
 
-        k = min(max(k, 0), scores.size)
+        k = min(k, len(scores))
         if k <= 0:
-            return RetrievalResult(np.array([]), np.array([]))
+            return RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
+
         top = np.argpartition(-scores, k - 1)[:k]
         order = top[np.argsort(-scores[top])]
-        track_ids = np.array([self._idx_to_track[idx] for idx in order])
-        return RetrievalResult(track_ids, scores[order])
+        ids = np.array([self._idx_to_track[i] for i in order], dtype=object)
 
-    # Semantic retrieval -------------------------------------------------------
+        return RetrievalResult(ids, scores[order])
+
+    # Semantic retrieval via Azure embeddings + FAISS
     def by_nlq(self, text: str, k: int = 200) -> RetrievalResult:
-        np = _get_numpy()
         if not text:
-            return RetrievalResult(np.array([]), np.array([]))
+            return RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
 
-        k = max(k, 0)
-        if k == 0:
-            return RetrievalResult(np.array([]), np.array([]))
+        try:
+            r = AZURE_EMB_CLIENT.embeddings.create(
+                model=AZURE_EMBED_MODEL,
+                input=[text],
+            )
+            qvec = np.asarray([r.data[0].embedding], dtype="float32")
+        except Exception as exc:
+            LOGGER.warning(f"Azure embedding failed: {exc}")
+            return RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
 
-        query_vec = self.encoder.encode([text], normalize_embeddings=True).astype("float32")
-        distances, indices = self.index.search(query_vec, k)
-        return RetrievalResult(self.item_ids[indices[0]], distances[0])
+        distances, indices = self.index.search(qvec, k)
+        ids = self.item_ids[indices[0]]
+        scores = distances[0]
 
+        return RetrievalResult(ids.astype(object), scores.astype("float32"))
+
+
+# ─────────────────────────────────────────────
+# Ranking Layer
+# ─────────────────────────────────────────────
 
 def rank(
-    cf_candidates: RetrievalResult,
-    sem_candidates: RetrievalResult,
+    cf: RetrievalResult,
+    sem: RetrievalResult,
     meta_df,
     intent: Optional[Intent] = None,
-    user_history: Optional[Dict[str, Iterable[str]]] = None,
     weights: Tuple[float, float, float, float] = (0.45, 0.35, 0.15, 0.05),
     limit: int = 100,
 ) -> List[Tuple[str, float]]:
-    """Blend collaborative and semantic scores with metadata + intent.
-
-    weights = (w_cf, w_sem, w_meta, w_intent)
     """
+    Merge CF + semantic candidates and re-score with metadata + intent.
+    Returns a list of (track_id, score) sorted descending.
+    """
+    # Merge IDs while preserving relative order
+    all_ids: List[str] = []
+    seen = set()
 
-    np = _get_numpy()
-
-    w_cf, w_sem, w_meta, w_intent = weights
-    user_history = user_history or {"skipped_ids": []}
-    skipped_ids = set(user_history.get("skipped_ids", []))
-
-    cf_map = {cid: score for cid, score in zip(cf_candidates.ids, cf_candidates.scores)}
-    sem_map = {cid: score for cid, score in zip(sem_candidates.ids, sem_candidates.scores)}
-
-    # union of all candidate ids
-    seen: Dict[str, None] = {}
-    for cid in cf_candidates.ids:
-        seen.setdefault(cid, None)
-    for cid in sem_candidates.ids:
-        seen.setdefault(cid, None)
-    candidates = list(seen.keys())
+    for arr in [cf.ids, sem.ids]:
+        for tid in arr:
+            tid = str(tid)
+            if tid not in seen:
+                seen.add(tid)
+                all_ids.append(tid)
 
     results: List[Tuple[str, float]] = []
 
-    for cid in candidates:
+    cf_id_to_idx = {str(tid): i for i, tid in enumerate(cf.ids)}
+    sem_id_to_idx = {str(tid): i for i, tid in enumerate(sem.ids)}
+
+    for tid in all_ids:
+        idx_cf = cf_id_to_idx.get(tid)
+        idx_sem = sem_id_to_idx.get(tid)
+
+        s_cf = float(cf.scores[idx_cf]) if idx_cf is not None else 0.0
+        s_sem = float(sem.scores[idx_sem]) if idx_sem is not None else 0.0
+
         meta_bonus = 0.0
         intent_bonus = 0.0
-
-        s_cf = float(cf_map.get(cid, 0.0))
-        s_sem = float(sem_map.get(cid, 0.0))
 
         row = None
         if meta_df is not None:
             try:
-                row = meta_df.loc[cid]
+                row = meta_df.loc[tid]
             except Exception:
                 row = None
 
-        popularity = 0.0
-        release_year = None
-
-        if row is not None and hasattr(row, "get"):
-            # Popularity normalised [0,1]
-            popularity = float(row.get("popularity", 0) or 0) / 100.0
+        # Metadata scoring
+        if row is not None:
+            # Popularity (0-100)
+            popularity = row.get("popularity", 0)
+            try:
+                popularity = float(popularity or 0) / 100.0
+            except Exception:
+                popularity = 0.0
             meta_bonus += 0.4 * popularity
 
-            # Recency bonus based on release year (if present)
-            release_year = row.get("release_year")
-            if release_year:
-                try:
-                    release_year_int = int(release_year)
-                    current_year = datetime.now().year
-                    recency = max(0.0, 1.0 - (current_year - release_year_int) / 30.0)
-                    meta_bonus += 0.3 * recency
-                except Exception:
-                    pass
+            # Recency
+            ry = row.get("release_year")
+            try:
+                if ry is not None and not (isinstance(ry, float) and np.isnan(ry)):
+                    ry_int = int(ry)
+                    rec = max(0.0, 1.0 - (datetime.now().year - ry_int) / 30.0)
+                    meta_bonus += 0.3 * rec
+            except Exception:
+                pass
 
-            # Playlist-sourced tracks get a small bump
             if row.get("source_type") == "playlist":
                 meta_bonus += 0.1
 
-            # Repeatedly skipped items get a penalty
-            if cid in skipped_ids:
-                meta_bonus -= 0.2
+        # Intent alignment
+        if intent and row is not None:
+            genres_str = str(row.get("genres") or "").lower()
 
-        # Intent-driven scoring
-        if intent and row is not None and hasattr(row, "get"):
-            genres_str = ""
-            genres_val = row.get("genres")
-            if isinstance(genres_val, (list, tuple)):
-                genres_str = " ".join(str(g).lower() for g in genres_val)
-            elif isinstance(genres_val, str):
-                genres_str = genres_val.lower()
+            if intent.genres and any(g in genres_str for g in intent.genres):
+                intent_bonus += 0.4
 
-            # Genre alignment
-            if intent.genres:
-                if any(g.lower() in genres_str for g in intent.genres):
-                    intent_bonus += 0.4
-
-            # Era alignment
-            if intent.era and (intent.era.from_year or intent.era.to_year) and release_year:
+            # Era filter
+            if intent.era and row.get("release_year") is not None:
                 try:
-                    y = int(release_year)
-                    from_y = intent.era.from_year or 1900
-                    to_y = intent.era.to_year or datetime.now().year
-                    if from_y <= y <= to_y:
+                    y = int(row.get("release_year"))
+                    fy = intent.era.from_year or 1800
+                    ty = intent.era.to_year or datetime.now().year
+                    if fy <= y <= ty:
                         intent_bonus += 0.3
                 except Exception:
                     pass
 
-            # Vocal preference
-            vocals_flag = row.get("vocals")
-            if intent.avoid_vocals and vocals_flag:
-                intent_bonus -= 0.5
+            # Very rough vocal penalty
+            if intent.avoid_vocals and str(row.get("title", "")).lower().count("feat") > 0:
+                intent_bonus -= 0.3
 
-        score = (
-            w_cf * s_cf +
-            w_sem * s_sem +
-            w_meta * meta_bonus +
-            w_intent * intent_bonus
-        )
+        w_cf, w_sem, w_meta, w_int = weights
+        score = w_cf * s_cf + w_sem * s_sem + w_meta * meta_bonus + w_int * intent_bonus
 
-        results.append((cid, score))
+        results.append((tid, float(score)))
 
-    results.sort(key=lambda item: item[1], reverse=True)
+    results.sort(key=lambda x: x[1], reverse=True)
     return results[:limit]
 
 
-class RecommendationEngine:
-    """High level orchestrator for the recommendation workflow."""
+# ─────────────────────────────────────────────
+# Engine
+# ─────────────────────────────────────────────
 
-    def __init__(
-        self,
-        data_dir: Path | str = model_utils.DATA_DIR,
-        artifact_dir: Path | str = model_utils.ARTIFACT_DIR,
-    ) -> None:
+class RecommendationEngine:
+    def __init__(self, data_dir=model_utils.DATA_DIR, artifact_dir=model_utils.ARTIFACT_DIR):
         self.data_dir = Path(data_dir)
         self.artifact_dir = Path(artifact_dir)
-        self._lock = threading.RLock()
         self._retriever: Optional[HybridRetriever] = None
         self._meta = None
-        self._fallback_reason: Optional[str] = None
+        self._lock = threading.RLock()
 
-    # Lazy loaders ------------------------------------------------------------
-    def _load_retriever(self) -> Optional[HybridRetriever]:
+    def _load_retriever(self) -> HybridRetriever:
         with self._lock:
-            if self._retriever is not None:
-                return self._retriever
-
-            try:
+            if self._retriever is None:
                 self._retriever = HybridRetriever(self.artifact_dir)
-                LOGGER.info("HybridRetriever initialised successfully.")
-            except (FileNotFoundError, model_utils.MissingArtifactError, model_utils.DependencyError) as exc:
-                LOGGER.warning("Falling back to rule-based recommendations: %s", exc)
-                self._fallback_reason = str(exc)
-                self._retriever = None
             return self._retriever
 
     def _load_meta(self):
         if self._meta is None:
-            try:
-                self._meta = model_utils.load_metadata(self.data_dir / "items.parquet")
-            except (FileNotFoundError, model_utils.MissingDataError, model_utils.DependencyError) as exc:
-                LOGGER.warning("Metadata unavailable: %s", exc)
-                self._meta = None
+            self._meta = model_utils.load_metadata(self.data_dir / "items.parquet")
         return self._meta
 
-    # Public API --------------------------------------------------------------
+    def _format(self, track_id, score, meta_df):
+        """
+        Enriched formatter:
+        - If metadata exists → return enriched output
+        - If missing → auto-fetch from Spotify → append to parquet → reload metadata
+        """
+        # Normalize possible numpy types
+        if not isinstance(track_id, str):
+            track_id = str(track_id)
+
+        data = {"track_id": track_id, "score": float(score)}
+
+        # 1 — If metadata exists normally
+        if track_id in meta_df.index:
+            row = meta_df.loc[track_id]
+            for f in [
+                "title", "artist", "album", "release_date",
+                "popularity", "image_url", "source_type", "release_year"
+            ]:
+                val = row.get(f)
+                if hasattr(val, "item"):  # handle numpy scalar
+                    val = val.item()
+                data[f] = val
+            return data
+
+        # 2 — AUTO-FETCH METADATA FROM SPOTIFY
+        print(f"[INFO] Metadata missing → fetching from Spotify: {track_id}")
+        meta = model_utils.fetch_track_metadata(track_id)
+
+        if meta:
+            # Append to parquet
+            parquet_path = self.data_dir / "items.parquet"
+            model_utils.append_metadata_row(parquet_path, meta)
+
+            # Reload metadata in engine
+            self._meta = model_utils.load_metadata(parquet_path)
+
+            # Hydrate formatting
+            data.update({
+                "title": meta["title"],
+                "artist": meta["artist"],
+                "album": meta["album"],
+                "release_date": meta["release_date"],
+                "popularity": meta["popularity"],
+                "image_url": meta["image_url"],
+                "source_type": meta["source_type"],
+                "release_year": meta["release_year"],
+            })
+            return data
+
+        # 3 — If everything fails
+        data["error"] = f"metadata_fetch_failed: {track_id}"
+        return data
+
     def recommend(self, prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-        prompt = prompt or ""
         retriever = self._load_retriever()
         meta = self._load_meta()
 
-        if retriever is None:
-            return self._fallback(prompt, user_id)
-
-        cf_result = RetrievalResult(np.array([]), np.array([]))
-        sem_result = RetrievalResult(np.array([]), np.array([]))
-
-        intent: Optional[Intent] = None
-        if prompt:
-            intent = parse_nl_llm(prompt)
-
-        if user_id:
-            cf_result = retriever.by_cf(user_id)
-        if prompt:
-            sem_result = retriever.by_nlq(prompt)
-
-        scored = rank(
-            cf_result,
-            sem_result,
-            meta,
-            intent=intent,
-            user_history={"skipped_ids": []},
+        cf_res = (
+            retriever.by_cf(user_id)
+            if user_id is not None
+            else RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
         )
-        payload = [self._payload_item(cid, score, meta) for cid, score in scored]
-        explanation = self._build_explanation(
-            intent,
-            bool(cf_result.ids.size),
-            bool(sem_result.ids.size),
+        sem_res = (
+            retriever.by_nlq(prompt)
+            if prompt
+            else RetrievalResult(np.array([], dtype=object), np.array([], dtype="float32"))
         )
 
-        return {
+        intent = parse_nl_llm(prompt) if prompt else None
+        ranked = rank(cf_res, sem_res, meta, intent=intent)
+
+        recs = [self._format(tid, score, meta) for tid, score in ranked]
+
+        result: Dict[str, Any] = {
             "prompt": prompt,
             "user_id": user_id,
-            "intent": json.loads(intent.json()) if intent else None,
-            "recommendations": payload,
-            "count": len(payload),
-            "explanation": explanation,
+            "intent": _to_python(json.loads(intent.json())) if intent else None,
+            "recommendations": recs,
+            "count": len(recs),
         }
+        return _to_python(result)
 
-    # Helpers -----------------------------------------------------------------
-    def _fallback(self, prompt: str, user_id: Optional[str]) -> Dict[str, Any]:
-        """Fallback deterministic response when artefacts are unavailable."""
-
-        baseline = [
-            {"track_id": "mix_daily", "title": "Daily Mix", "artist": "Various", "score": 0.1},
-            {"track_id": "coffee_morning", "title": "Morning Coffee", "artist": "Lo-Fi", "score": 0.05},
-            {"track_id": "acoustic_essentials", "title": "Acoustic Essentials", "artist": "Indie", "score": 0.02},
-        ]
-        reason = self._fallback_reason or "Required ML artefacts are not available."
-        return {
-            "prompt": prompt,
-            "user_id": user_id,
-            "intent": None,
-            "recommendations": baseline,
-            "count": len(baseline),
-            "explanation": reason,
-        }
-
-    def _payload_item(self, track_id: str, score: float, meta_df) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"track_id": track_id, "score": float(score)}
-        if meta_df is not None:
-            try:
-                row = meta_df.loc[track_id]
-            except Exception:
-                row = None
-            if row is not None and hasattr(row, "get"):
-                # Safely pull common metadata fields if present
-                for field in [
-                    "title",
-                    "artist",
-                    "album",
-                    "image_url",
-                    "genres",
-                    "source_type",
-                    "popularity",
-                    "release_year",
-                    "preview_url",
-                ]:
-                    value = row.get(field) if hasattr(row, "get") else None
-                    if value is not None:
-                        data[field] = value
-        return data
-
-    @staticmethod
-    def _build_explanation(intent: Optional[Intent], has_cf: bool, has_sem: bool) -> str:
-        parts: List[str] = []
-        if intent:
-            if intent.moods:
-                parts.append(f"Mood detected: {', '.join(intent.moods)}.")
-            if intent.genres:
-                parts.append(f"Genre preference: {', '.join(intent.genres)}.")
-            if intent.era and (intent.era.from_year or intent.era.to_year):
-                start = intent.era.from_year or "any"
-                end = intent.era.to_year or "now"
-                parts.append(f"Era preference: {start}–{end}.")
-            if intent.avoid_vocals:
-                parts.append("Filtered toward instrumental / low-vocal tracks.")
-
-        if has_cf:
-            parts.append("Incorporated collaborative filtering from user history.")
-        if has_sem:
-            parts.append("Used semantic similarity over track embeddings.")
-        if not parts:
-            return "Default ranking applied."
-        return " ".join(parts)
-
+# ─────────────────────────────────────────────
+# Singleton API + Debug Helpers
+# ─────────────────────────────────────────────
 
 _ENGINE: Optional[RecommendationEngine] = None
 _ENGINE_LOCK = threading.Lock()
@@ -564,22 +561,54 @@ def _get_engine() -> RecommendationEngine:
                 _ENGINE = RecommendationEngine()
     return _ENGINE
 
-
 def llm_recommender(prompt: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-    """Public entry point used by the threaded HTTP server."""
+    """
+    Public entry point used in your REPL tests and (eventually) HTTP API.
+    """
+    return _get_engine().recommend(prompt, user_id)
 
-    engine = _get_engine()
-    return engine.recommend(prompt=prompt, user_id=user_id)
 
+def debug_intent_llm(query: str) -> str:
+    """
+    Sends the query directly to the LLM and prints the *raw* response text
+    before any JSON parsing or repair. Returns raw text.
+    """
+    print("\n DEBUG INTENT LLM MODE — RAW RESPONSE BELOW\n")
+
+    resp = AZURE_CHAT_CLIENT.chat.completions.create(
+        model=AZURE_CHAT_MODEL,
+        temperature=0,
+        max_tokens=400,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Return JSON only. No natural language. "
+                    "Keys: moods, avoid_vocals, genres, "
+                    "energy:{min,max}, tempo_bpm:{min,max}, "
+                    "era:{from_year,to_year}, include_artists, exclude_artists."
+                ),
+            },
+            {"role": "user", "content": query},
+        ],
+    )
+
+    raw = resp.choices[0].message.content
+
+    print("RAW MODEL OUTPUT:\n")
+    print(raw)
+    print("\n END RAW OUTPUT\n")
+
+    return raw
 
 __all__ = [
+    "Intent",
     "Range",
     "Era",
-    "Intent",
-    "parse_nl",
-    "parse_nl_llm",
     "HybridRetriever",
     "rank",
     "RecommendationEngine",
     "llm_recommender",
+    "parse_nl_llm",
+    "debug_intent_llm",
 ]
