@@ -39,7 +39,7 @@ class Settings:
     # Your fine-tuned model should be set here
     AZURE_OPENAI_CHAT_MODEL = os.getenv(
         "AZURE_OPENAI_CHAT_MODEL",
-        "gpt-4o-mini-2024-07-18-ft-9af2ed31da034b8a801470c99cf93bfa"
+        "gpt-4.1-mini"
     )
 
     # ─────────────────────────────────────────────

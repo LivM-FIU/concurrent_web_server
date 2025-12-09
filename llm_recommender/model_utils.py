@@ -140,13 +140,6 @@ def fetch_track_metadata(track_id: str) -> dict:
         return None
 
 def load_metadata(path: Path | str = DATA_DIR / "items.parquet"):
-    """
-    Loads metadata CLEANLY:
-        - Safe handling of release_date → release_year
-        - Ensures proper schema
-        - Ensures track_id is NOT the index
-    """
-
     path = Path(path)
 
     if not path.exists():
@@ -157,29 +150,26 @@ def load_metadata(path: Path | str = DATA_DIR / "items.parquet"):
         df = pd.read_parquet(path)
     except Exception as exc:
         raise RuntimeError(
-            f"❌ items.parquet is corrupted: {exc}\n"
+            f" items.parquet is corrupted: {exc}\n"
             f"Fix with: rebuild_items_parquet()"
         )
 
-    # Remove old leftover index columns
+    # Remove leftover index column
     if "index" in df.columns:
         df = df.drop(columns=["index"])
 
     df = enforce_metadata_schema(df)
 
+    # 🔥 FIX: normalize NA → None so JSON can serialize
+    df = df.astype(object).where(pd.notna(df), None)
+
+    # Set track_id as index
+    if "track_id" in df.columns:
+        df = df.set_index("track_id")
+
     return df
 
 def append_metadata_row(parquet_path: str | Path, row: dict):
-    """
-    Appends ONE row to items.parquet SAFELY.
-
-    Fixes:
-      ✔ never writes index
-      ✔ never introduces int64 index corruption
-      ✔ removes legacy "index" column
-      ✔ enforces schema before write
-    """
-
     if row is None:
         return
 
@@ -224,7 +214,7 @@ def rebuild_items_parquet(raw_path: Path | str, out_path: Path | str):
     out_path.parent.mkdir(exist_ok=True)
     df.to_parquet(out_path, index=False)
 
-    LOGGER.info(f"✔ items.parquet rebuilt → {out_path}")
+    LOGGER.info(f"items.parquet rebuilt → {out_path}")
 
 # ─────────────────────────────────────────────
 # ALS + Embeddings + FAISS (UNCHANGED)
