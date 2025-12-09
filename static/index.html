@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PulseMix | Music Prompts Powered by LLMs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+        href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+        rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <div class="page-shell">
+        <header class="site-header">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true">🎶</span>
+                <div class="brand-copy">
+                    <p class="brand-name">PulseMix</p>
+                    <p class="brand-tag">LLM-guided music inspiration</p>
+                </div>
+            </div>
+            <nav class="site-nav" aria-label="Primary">
+                <a href="#prompt-lab">Prompt lab</a>
+                <a href="#results">Your mix</a>
+                <a href="#ideas">Spark ideas</a>
+            </nav>
+        </header>
+
+        <main>
+            <section class="hero" id="prompt-lab">
+                <div class="hero-content">
+                    <p class="hero-eyebrow">Fresh drop</p>
+                    <h1>Spin up playlists with a single thought.</h1>
+                    <p class="hero-lede">
+                        Describe the mood, moment, or story you want to soundtrack and let the language model do the crate digging.
+                        PulseMix pairs expressive prompts with concurrent serving so you get sonic ideas fast.
+                    </p>
+                    <ul class="hero-highlights">
+                        <li>Personalized inspiration from one creative sentence.</li>
+                        <li>Instant response thanks to a lightweight concurrent server.</li>
+                        <li>Shareable prompt recipes for teams and friends.</li>
+                    </ul>
+                </div>
+
+                <aside class="prompt-card" aria-label="Prompt workspace">
+                    <form id="prompt-form" novalidate>
+                        <div class="prompt-card__header">
+                            <h2>Create a vibe</h2>
+                            <span class="status-pill" aria-live="polite" aria-atomic="true">Ready</span>
+                        </div>
+                        <label class="input-label" for="prompt-input">Describe what you want to hear</label>
+                        <textarea
+                            id="prompt-input"
+                            name="prompt"
+                            rows="4"
+                            maxlength="280"
+                            placeholder="e.g. warm neo-soul grooves for a rainy Sunday brunch"
+                            required
+                        ></textarea>
+                        <p class="char-count" id="char-count">0 / 280</p>
+                        <div class="button-row">
+                            <button id="recommend-btn" type="submit" class="btn primary">Generate mix</button>
+                            <button id="random-btn" type="button" class="btn ghost">Give me a spark</button>
+                        </div>
+                        <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+                    </form>
+                </aside>
+            </section>
+
+            <section class="results" id="results" aria-live="polite">
+                <header class="section-header">
+                    <div>
+                        <h2>Your curated mix</h2>
+                        <p class="section-tag">Powered by LLM-driven recommendations</p>
+                    </div>
+                    <button id="reset-btn" type="button" class="btn subtle">Clear results</button>
+                </header>
+                <div id="recommendations" class="recommendations-grid empty" data-empty-label="Prompt the muse to fill this space.">
+                    <div class="placeholder" aria-hidden="true">
+                        <span class="placeholder-icon">✨</span>
+                        <p>Start by sharing a mood, genre mashup, or the story you want to tell.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="ideas" id="ideas">
+                <header class="section-header">
+                    <div>
+                        <h2>Prompt sparks</h2>
+                        <p class="section-tag">Jump-start your session with curated ideas</p>
+                    </div>
+                </header>
+                <div class="ideas-grid">
+                    <article class="idea-card">
+                        <h3>Late-night coding sprint</h3>
+                        <p>Lo-fi beats with airy vocals, muted bass, and subtle tape hiss to stay in flow.</p>
+                    </article>
+                    <article class="idea-card">
+                        <h3>Retro future roller rink</h3>
+                        <p>Glossy synthwave, slap bass, and vocoder hooks with a neon sheen.</p>
+                    </article>
+                    <article class="idea-card">
+                        <h3>Indie film finale</h3>
+                        <p>Intimate piano, fragile strings, and soft electronic pulses for cathartic closers.</p>
+                    </article>
+                    <article class="idea-card">
+                        <h3>Sunrise rooftop set</h3>
+                        <p>Uplifting house grooves with percussive sparkle and gentle vocal chops.</p>
+                    </article>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div>
+                <p class="footer-title">Built for creative technologists</p>
+                <p class="footer-copy">PulseMix runs on a custom concurrent web server with rate-limiting safeguards for public deploys.</p>
+            </div>
+            <div class="footer-links">
+                <a href="https://openai.com" target="_blank" rel="noreferrer">About the LLM</a>
+                <a href="mailto:hello@pulsemix.ai">Contact</a>
+            </div>
+        </footer>
+    </div>
+
+    <script src="/static/script.js" defer></script>
+</body>
+</html>
